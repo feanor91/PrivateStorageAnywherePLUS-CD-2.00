@@ -7,6 +7,9 @@ Open Private Storage and all five housing storage panels from normal gameplay. P
 > [!IMPORTANT]
 > This build is matched to Crimson Desert 2.00 and has been tested only on that version. It will not work on 1.18.2 or earlier.
 
+> [!NOTE]
+> **Newer game builds.** The September 2026 update (build 2850) moved the game's internals again. This repository now carries `tools/retarget_ay.py`, which re-targets the tested 2.00 ASI to a newer executable without the pristine v1.5.10 input, plus the record of that port in [PORT-2850.md](PORT-2850.md) and the procedure to repeat it after the next update in [PORTING.md](PORTING.md). On build 2850, `PrivateStorageExpansions` must be set to the real expansion count (not `-1`).
+
 ## Download
 
 Download `PrivateStorageAnywherePLUS-CD-2.00-FINAL.zip` from this repository's **Releases** page. The GitHub source archive is not the installable mod package.

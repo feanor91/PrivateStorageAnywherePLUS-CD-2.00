@@ -1,5 +1,26 @@
 # Changelog
 
+## Crimson Desert build 2850 re-targeting (2026-09-15)
+
+Not a new release package: a build script and its record. See [PORT-2850.md](PORT-2850.md) and [PORTING.md](PORTING.md).
+
+### Added
+
+- `tools/retarget_ay.py`: re-targets the tested AX release to a newer executable. Derives the mainChar global by access profile, ModeSwitch and the mode-object offset from the tag-builder route, ResolveActor by call-site majority, CampWareHouse by string xref, and the InventoryInfoManager vtable from RTTI; stops on any ambiguity.
+- Runtime resolution of the InventoryInfoManager global by vtable identity (`--housing`), replacing the mod's SetInventory scan that build 2850 defeated.
+- `--f4 dry|live`: reopens the private-storage path with the CampWareHouse key as a constant, first as a read-only dry run.
+- `docs/logs-2850/`: the FATAL log on the AX release and the passing logs of each build.
+
+### Changed on build 2850
+
+- `PrivateStorageExpansions` must be an explicit value; with `-1` the base is written after the save has built the container and transfers are refused.
+
+### Not carried over
+
+- NameToKey is not re-anchored (key 8 assumed and validated at runtime).
+- The capture hook does not arm (VirtualAlloc stage 3); the fallback route is used.
+
+
 ## Crimson Desert 2.00 compatibility release
 
 Tested on Crimson Desert 2.00: all six panels opened and closed, both capacity behaviors were confirmed, and no crash or freeze occurred.
