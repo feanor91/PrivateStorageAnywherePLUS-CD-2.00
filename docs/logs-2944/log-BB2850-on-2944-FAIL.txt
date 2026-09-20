@@ -1,0 +1,92 @@
+=== Private Storage Anywhere v1.5.10 (CD 2850.BB) ===
+Game window: class='WindowsLauncherClassName' title='Crimson Desert'
+Base: 0x140000000  Size: 0x17FCD000  LegacyHotkey: 0x00
+  Panel[0] Private     : kb=0x73 mod=0x00 xi=0x0040 xiMod=0x0100 psBtn=(off=1,mask=0x40) psMod=(off=1,mask=0x01)
+  Panel[1] Gatherables : kb=0x74 mod=0x00 xi=0x0080 xiMod=0x0100 psBtn=(off=1,mask=0x80) psMod=(off=1,mask=0x01)
+  Panel[2] Dresser     : kb=0x75 mod=0x00 xi=0x0000 xiMod=0x0000 psBtn=(off=-1,mask=0x00) psMod=(off=-1,mask=0x00)
+  Panel[3] Refrigerator: kb=0x76 mod=0x00 xi=0x0000 xiMod=0x0000 psBtn=(off=-1,mask=0x00) psMod=(off=-1,mask=0x00)
+  Panel[4] Symbol      : kb=0x77 mod=0x00 xi=0x0000 xiMod=0x0000 psBtn=(off=-1,mask=0x00) psMod=(off=-1,mask=0x00)
+  Panel[5] Collecting  : kb=0x78 mod=0x00 xi=0x0000 xiMod=0x0000 psBtn=(off=-1,mask=0x00) psMod=(off=-1,mask=0x00)
+meta/0.papgt CRC32: F75C7247
+  String 'ShowPackageCampMoneyList' at base+0x5659EC0
+  LEA at base+0xD35A49
+Handler:      OK base+0xD35810 (string-xref)
+SetInventory: OK base+0xD372B0 (string-xref)
+SetTitle:     OK base+0x3ED4DA0 (string-xref)
+BottomLabel:  OK offset=0x418 (handler → SetTitle callsite)
+TopTitle:     DISABLED (binding chain top=0x0 check=0x418 bottomLabel=0x418) — top title stays generic
+SetDonationFaction: OK base+0xD37D70
+DonationOff:  OK offset=0x330 (SetDonationFaction → MOV [reg+N],BX)
+SetTitleDir:  FAIL base+0x0 (SetTitle internal)
+PrepareOffs:  OK offs=0x3D8/0x3E8/0x410 (handler scan)
+  Vtable at base+0x565A3A8, CanShow at base+0xABD8950 (vtable offset 0xFFFFFFFFFFFFFBB0), active flag offset 0x130
+CanShow:      OK base+0xABD8950 (vtable)
+  Vtable start at base+0x5659F28 (handler offset 0x480, class=.?AVUIGamePlayControlRootWarehouse2@uiCommonScript@pa@@)
+ModalDlgOff:  OK offset=0x258 (hardcoded for Apr-23 1.0.4.1)
+MainCharGlobal: OK base+0x6C2DA48 (singleton scan, r0, modeOff=0x0)
+StoreSubIndex: derive failed, keeping default 5
+LangByte:     OK base+0x6A50B1D (koreana table scan)
+HGM string slot: WARN string-xref scan failed — Gatherables type-id lookup disabled (INI fallback only)
+Type resolver:   DISABLED (function not re-resolved; INI fallback used for housing chests)
+Inventory mgr ptr:   DEFERRED (AZ) - resolved at runtime by InventoryInfoManager vtable base+0x57A37D0
+ItemDetailCtor:      OK base+0xE2C090 (string-xref "ItemDetailModalMessage")
+Container vtable:    auto-relearn (5 consecutive sightings at handler+0x170)
+HOOK Handler: OK base+0xD35810 (size=15)
+HOOK CanShow: OK base+0xABD8950 (size=14)
+HOOK ItemDetailOpen: OK base+0xE2C090 (size=15)
+mainChar: DEFERRED (singleton not ready yet)
+=== READY! Press F6 to open Private Storage from anywhere ===
+  [MODE] capture hook NOT armed (stage 2)
+AUTO-CAPTURED warehouse controller: 0x59B81C23200 (panelId=0x0000)
+[CAP] +0x2CD 255->0  +0x218=0x59C703BC580 +0x120=0x0 +0x128=0 +0x2CC=0 +0x2CA=0 +0x1B0=0x0 active=0
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Gatherables (vk=0x74) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+HOTKEY Private (vk=0x73) -> OPEN
+NOT READY: mainChar
+ItemDetailModal opened

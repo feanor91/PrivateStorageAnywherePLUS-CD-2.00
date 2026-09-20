@@ -87,9 +87,7 @@ SCAN_ENTRY = 0x9AE9          # MainCharGlobal singleton scan: loop entry
 SCAN_END = 0x9BB1            # ... up to the OK path
 SCAN_OK = 0x9BCD             # `lea rcx,"MainCharGlobal: OK ..." ; sub rdx,rdi ; call log`
 SLOT_PATCHER = 0x8720
-OLD_TAG, NEW_TAG = b"CD 2.00.AX", b"CD 2850.AY"
-TAG_AZ = b"CD 2850.AZ"
-TAG_BA, TAG_BB = b"CD 2850.BA", b"CD 2850.BB"
+OLD_TAG = b"CD 2.00.AX"        # the tag is 10 bytes; ours is "CD <build>.<XY>"
 CAMP_KEY = 8                 # InventoryKey::CampWareHouse (2.00 value; see --f4 in the docstring)
 GAME_SIZE = 0x3D358          # qword: game SizeOfImage
 LOGGER = 0x6DE0              # printf-style log sink
@@ -208,8 +206,10 @@ def derive_mode_obj_disp(g: Game, ms):
     2.00). Read it from that one instruction; refuse anything else."""
     if ms % 8:
         fail(f"ModeSwitch {ms:#x} is not 8-byte aligned")
-    if g.read(ms, 15) != MODE_SWITCH_PROLOGUE:
-        fail("ModeSwitch prologue mismatch")
+    hook_ok = g.read(ms, 15) == MODE_SWITCH_PROLOGUE
+    if not hook_ok:
+        note(f"ModeSwitch prologue changed ({g.read(ms, 8).hex(' ')} ...): the capture "
+             "hook will refuse to arm at stage 2; the fallback route is used, as on 2850")
     sites = []
     for s in g.code:
         b = g.blob[s.VirtualAddress]
@@ -222,14 +222,20 @@ def derive_mode_obj_disp(g: Game, ms):
             p = i + 1
             if va + i + 5 + struct.unpack_from("<i", b, i + 1)[0] == ms:
                 sites.append(va + i)
-    if len(sites) != 1:
-        fail(f"ModeSwitch {ms:#x} has {len(sites)} direct callers, expected 1")
-    pre = g.read(sites[0] - 7, 7)
-    if not (pre[0] & 0xF8 == 0x48 and pre[1] == 0x8B and pre[2] >> 6 == 2 and pre[2] & 7 != 4):
-        fail(f"instruction before the ModeSwitch call is not mov r64,[r64+disp32]: {pre.hex(' ')}")
-    disp = struct.unpack_from("<i", pre, 3)[0]
+    if not 1 <= len(sites) <= 4:
+        fail(f"ModeSwitch {ms:#x} has {len(sites)} direct callers, expected 1..4")
+    disps = set()
+    for site in sites:
+        pre = g.read(site - 7, 7)
+        if not (pre[0] & 0xF8 == 0x48 and pre[1] == 0x8B and pre[2] >> 6 == 2 and pre[2] & 7 != 4):
+            fail(f"instruction before the ModeSwitch call at {site:#x} is not mov r64,[r64+disp32]: {pre.hex(' ')}")
+        disps.add(struct.unpack_from("<i", pre, 3)[0])
+    if len(disps) != 1:
+        fail(f"ModeSwitch call sites disagree on the mode-object offset: {sorted(hex(d) for d in disps)}")
+    disp = disps.pop()
     if not 0x800 <= disp <= 0x4000:
         fail(f"mode-object offset {disp:#x} is outside the plausible range")
+    note(f"ModeSwitch has {len(sites)} direct caller(s), all loading the mode object from [parent+{disp:#x}]")
     return disp
 
 
@@ -242,15 +248,41 @@ def derive_layout(g: Game):
     builder = g.merged_function(lea)
     if not builder:
         fail("BuildModeTagList has no .pdata entry")
+    # Each dispatch is `cmp r8,N ; ja ; ... mov r32,[base+idx*4+TBL]`: bound
+    # every table by the cmp immediately preceding its own load. (The
+    # original read_jump_tables pairs cmps and tables by order, which the
+    # chained/merged ranges on 2944 broke.)
     ingame = store = None
-    for tbl, entries in D.read_jump_tables(g.pe, builder, tag_vas):
-        labelled = [(i, t) for i, _, t in entries if t]
-        for i, tags in labelled:
-            if "ingame-global" in tags and i < 7 and ingame is None:
-                ingame = i
-        stores = [i for i, tags in labelled if "store" in tags]
-        if stores:
-            store = stores[0]            # the sub-mode table is read last
+    ins = g.dis(builder[0], builder[1] - builder[0])
+    seen = set()
+    for k, i in enumerate(ins):
+        for op in i.operands:
+            if not (op.type == x86.X86_OP_MEM and op.mem.index and op.mem.scale == 4 and op.mem.disp > 0x1000):
+                continue
+            tbl = op.mem.disp
+            if tbl in seen:
+                continue
+            seen.add(tbl)
+            bound = 0x11
+            for j in ins[max(0, k - 8):k]:
+                if (j.mnemonic == "cmp" and len(j.operands) == 2 and j.operands[0].type == x86.X86_OP_REG
+                        and j.operands[1].type == x86.X86_OP_IMM and 0 < j.operands[1].imm <= 0x40):
+                    bound = j.operands[1].imm + 1
+            try:
+                raw = g.pe.get_data(tbl, bound * 4)
+            except Exception:
+                continue
+            labels = {}
+            for n in range(bound):
+                t = D.tags_emitted(g.pe, g.base + struct.unpack_from("<i", raw, n * 4)[0], tag_vas)
+                if t:
+                    labels[n] = t
+            note(f"jump table game+{tbl:#x} ({bound} entries): " + " ".join(f"[{n}]={'/'.join(t)}" for n, t in labels.items()))
+            for n, t in labels.items():
+                if "ingame-global" in t and ingame is None:
+                    ingame = n
+                if "store" in t and bound == 0x11:
+                    store = n
     ms = None
     for va in D.callers_of(g.pe, g.base + builder[0]):
         f = g.merged_function(va - g.base)
@@ -263,11 +295,39 @@ def derive_layout(g: Game):
     if not ms:
         fail("could not identify ModeSwitch among BuildModeTagList's callers")
     (lo, hi), (mode, submode, flags, subtypes, dirty) = ms
+    # mode/sub-mode: what ModeSwitch hands BuildModeTagList as its two byte
+    # arguments, read straight off the object. Build 2944 inserted a byte
+    # between the two (mode +0x28, an in-transition byte +0x29 that idles at
+    # 7 = "none", sub-mode +0x2A), so the pair is no longer adjacent and
+    # derive_from_modeswitch's adjacent-store rule picked the wrong byte.
+    pairs = set()
+    ins = g.dis(lo, hi - lo)
+    for k, i in enumerate(ins):
+        if not (i.mnemonic == "call" and i.op_str.startswith("0x") and int(i.op_str, 16) - g.base == builder[0]):
+            continue
+        a = b = None
+        for j in ins[max(0, k - 8):k]:
+            if j.mnemonic == "movzx" and len(j.operands) == 2 and j.operands[1].type == x86.X86_OP_MEM                     and j.operands[1].mem.index == 0 and 0 < j.operands[1].mem.disp < 0x100:
+                if j.operands[0].reg == x86.X86_REG_EDX:
+                    a = (j.operands[1].mem.base, j.operands[1].mem.disp)
+                elif j.operands[0].reg == x86.X86_REG_R8D:
+                    b = (j.operands[1].mem.base, j.operands[1].mem.disp)
+        if a and b and a[0] == b[0]:
+            pairs.add((a[1], b[1]))
+    if len(pairs) != 1:
+        fail(f"BuildModeTagList argument anchor is not unique in ModeSwitch: {sorted(pairs)}")
+    mode, submode = pairs.pop()
     lay = dict(mode=mode, submode=submode, flags=flags, subtypes=subtypes, dirty=dirty)
     if None in lay.values():
         fail(f"layout incomplete: {lay}")
-    for name, ok in D.INVARIANTS:
-        if not ok(lay):
+    checks = (
+        ("mode < submode <= mode + 2", mode < submode <= mode + 2),
+        ("flags == submode + 8", flags == submode + 8),
+        ("subtypes == flags + 7", subtypes == flags + 7),
+        ("dirty == subtypes + 0x23", dirty == subtypes + 0x23),
+    )
+    for name, ok in checks:
+        if not ok:
             fail(f"layout invariant failed: {name} ({lay})")
     return lo, lay, dict(ingame_mode=ingame, store_sub=store)
 
@@ -527,6 +587,71 @@ class Emit:
         return bytes(self.code)
 
 
+def game_build(g: Game):
+    """The last component of the executable's FileVersion (2850, 2944, ...)."""
+    pe = pefile.PE(data=g.data, fast_load=True)
+    pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+    for fi in getattr(pe, "FileInfo", []):
+        for e in fi:
+            if e.Key == b"StringFileInfo":
+                for st in e.StringTable:
+                    v = st.entries.get(b"FileVersion", b"").decode()
+                    if v:
+                        return v.split(".")[-1]
+    fail("no FileVersion resource in the executable")
+
+
+def apply_layout(asi, lay):
+    """Re-emit the mode-state layout AX baked in for 2.00/2850 (0x28/0x29/
+    0x31/0x38/0x5B): the four immediates of the layout stub (A) at 0x1460, the
+    two `mov byte [r9+dirty],1` stores of (F1)/(F2), and the diagnostic probe
+    `fin` -- its per-byte readability guards and its field reads. The two
+    `x=` bytes of the probe are the shadow-array pair subtypes+0x18/+0x19."""
+    sub, flags, subt, dirty, mode = lay["submode"], lay["flags"], lay["subtypes"], lay["dirty"], lay["mode"]
+    if not all(0 < v < 0x80 for v in (sub, flags, subt, dirty, mode)):
+        fail(f"layout offsets must fit a disp8: {lay}")
+    # (A) stub: mov [MODE_ANCHOR],rdx ; then 4x `C7 05 rel32 imm32`
+    asi.expect(0x1460, "48 89 15 49 c0 03 00 c7 05")
+    for n, (want, new) in enumerate(((0x28, mode), (0x29, sub), (0x31, flags), (0x38, subt))):
+        at = 0x1467 + n * 10 + 6
+        asi.expect(at, struct.pack("<I", want).hex())
+        asi.img[asi.off(at):asi.off(at) + 4] = imm32(new)
+    note(f"layout stub (A)              rva 0x1467: mode/sub/flags/subtypes -> {mode:#x}/{sub:#x}/{flags:#x}/{subt:#x}")
+    asi.replace_all(bytes.fromhex("41C6415B01"), b"\x41\xC6\x41" + bytes([dirty]) + b"\x01",
+                    f"dirty store [r9+{dirty:#x}]", 2)
+    # fin: prologue, then N guard blocks, then `mov rcx,[rsp+0x50]`, then reads
+    img = bytes(asi.img)
+    head = bytes.fromhex("4883EC68" "48894C2450" "89542458")
+    hits = [m.start() for m in re.finditer(re.escape(head), img)]
+    if len(hits) != 1:
+        fail(f"fin prologue not unique: {len(hits)}")
+    o = hits[0] + len(head)
+    shadow = (subt + 0x18, subt + 0x19)
+    probes = sorted({mode, sub, flags, subt, dirty, *shadow})
+    old_probes = sorted({0x28, 0x29, 0x31, 0x38, 0x5B, 0x50, 0x51})
+    for n, (want, new) in enumerate(zip(old_probes, probes)):
+        # block: 48 8B 4C 24 50 | 48 8D 89 imm32 | E8 rel32 | 84 C0 | 0F 84 rel32  (5+7+5+2+6 = 25)
+        blk = o + n * 25
+        if img[blk:blk + 8] != bytes.fromhex("488B4C2450488D89") or img[blk + 8:blk + 12] != imm32(want):
+            fail(f"fin guard block {n} has an unexpected shape at rva {asi.rva(blk):#x}")
+        asi.img[blk + 8:blk + 12] = imm32(new)
+    o += 25 * len(probes)
+    if img[o:o + 5] != bytes.fromhex("488B4C2450"):
+        fail("fin: read sequence not found after the guards")
+    o += 5
+    reads = ((0x29, sub), (0x31, flags), (0x38, subt), (0x5B, dirty), (0x50, shadow[0]), (0x51, shadow[1]))
+    for n, (want, new) in enumerate(reads):
+        at = o + n * 12                        # 0F B6 81 imm32 (7) + 48 89 44 24 xx (5)
+        if img[at:at + 3] != bytes.fromhex("0FB681") or img[at + 3:at + 7] != imm32(want):
+            fail(f"fin read {n} has an unexpected shape at rva {asi.rva(at):#x}")
+        asi.img[at + 3:at + 7] = imm32(new)
+    at = o + 12 * len(reads)
+    if img[at:at + 4] != bytes.fromhex("440FB689") or img[at + 4:at + 8] != imm32(0x28):
+        fail("fin: mode read not found")
+    asi.img[at + 4:at + 8] = imm32(mode)
+    note(f"diagnostic probe fin         rva {asi.rva(hits[0]):#x}: guards and reads re-emitted, shadow pair {shadow[0]:#x}/{shadow[1]:#x}")
+
+
 def apply_f4(asi, mode):
     """Reopen the AX private-storage path with a constant CampWareHouse key.
 
@@ -719,11 +844,10 @@ def main():
     note(f"ModeSwitch game+{ms:#x}  mode object at [parent+{mode_disp:#x}]")
     note("layout " + " ".join(f"{k}={v:#x}" for k, v in layout.items())
          + f"  ingame={modes['ingame_mode']} store={modes['store_sub']}")
-    if layout != AX_LAYOUT:
-        fail(f"mode-state layout changed ({layout} vs AX {AX_LAYOUT}); "
-             "AX's layout stub must be re-emitted, which this script does not do")
     if modes != AX_MODES:
         fail(f"mode values changed ({modes} vs AX {AX_MODES})")
+    build = game_build(g)
+    note(f"game FileVersion build {build}")
     loads = g.rip_loads()
     mainchar = derive_mainchar(g, loads)
     note(f"mainChar global game+{mainchar:#x}")
@@ -738,6 +862,8 @@ def main():
         note(f"manager scan window game+{win_lo:#x}..{win_hi:#x} ({(win_hi - win_lo) // 8} qwords)")
 
     print("\npatching")
+    if layout != AX_LAYOUT:
+        apply_layout(asi, layout)
     # (1) MainCharGlobal: replace the singleton scan loop with a direct store.
     #     Entered only by fall-through (verified: no branch targets inside),
     #     hands the OK path exactly the registers it expects: rdi = image base,
@@ -812,7 +938,10 @@ def main():
     at = bytes(asi.img).find(OLD_TAG)
     if at < 0 or bytes(asi.img).find(OLD_TAG, at + 1) >= 0:
         fail("build tag not unique")
-    tag = {None: TAG_AZ if housing else NEW_TAG, "dry": TAG_BA, "live": TAG_BB}[f4]
+    suffix = {None: "AZ" if housing else "AY", "dry": "BA", "live": "BB"}[f4]
+    tag = f"CD {build}.{suffix}".encode()
+    if len(tag) != len(OLD_TAG):
+        fail(f"build tag {tag!r} is not {len(OLD_TAG)} bytes")
     asi.img[at:at + len(OLD_TAG)] = tag
 
     # ------------------------------------------------------------- checks

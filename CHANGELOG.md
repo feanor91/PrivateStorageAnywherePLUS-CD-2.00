@@ -1,5 +1,10 @@
 # Changelog
 
+## Crimson Desert build 2944 re-targeting (2026-09-20)
+
+See [PORT-2944.md](PORT-2944.md). Script changes: tag-pool window widened, jump tables bounded per dispatch, mode/sub-mode taken from the BuildModeTagList arguments (a byte was inserted between them), layout re-emitted when it differs from AX, capture hook left disarmed when ModeSwitch's prologue changed, build tag from FileVersion. Tested: BB `930980fb…` — six panels, housing chests 1000, private storage 244/1000 with transfers.
+
+
 ## Crimson Desert build 2850 re-targeting (2026-09-15)
 
 Not a new release package: a build script and its record. See [PORT-2850.md](PORT-2850.md) and [PORTING.md](PORTING.md).

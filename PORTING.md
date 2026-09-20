@@ -69,18 +69,18 @@ InventoryInfoManager vtable game+0x57a37d0
 manager globals: 92 distinct, 0x6c2e288..0x6c4e590
 ```
 
-Les **chiffres changeront** à chaque build du jeu ; ce qui doit rester vrai :
+Les **chiffres changeront** à chaque build du jeu (sur 2944 : `ModeSwitch 0x640dc0`, `[parent+0x1188]`, layout `0x28/0x2a/0x32/0x39/0x5c`, mainChar `0x6d69208`) ; ce qui doit rester vrai :
 le profil mainChar dominé par `+0x0` avec `+0x50/+0x90/+0xa0/+0xb0` présents,
-un vainqueur net pour ResolveActor (≥ 2× le second), un layout mode inchangé
-(`0x28/0x29/0x31/0x38/0x5b`, mode 4, store 5), une seule vtable.
+un vainqueur net pour ResolveActor (≥ 2× le second), un layout mode cohérent avec ses invariants (le script le ré-émet s'il
+diffère de 2.00 — c'est arrivé sur 2944), mode 4, store 5, une seule vtable.
 
 ### Si le script s'arrête (`STOP: …`)
 
 | Message | Cause probable | Piste |
 |---|---|---|
 | `could not identify ModeSwitch among BuildModeTagList's callers` | le pool de tags UI (`store`, `ingame-global`) ou `BuildModeTagList` a changé | `derive_modestate.py <exe>` seul ; vérifier `find_tag_pool` / la fusion des entrées `.pdata` chaînées (`merged_function`) |
-| `mode-state layout changed` | la struct mode a bougé | le script ne réémet pas le stub de layout ; il faut reprendre `patch_private_storage_1182_modestate.py` (A), (F1), (F2) et `FIN_ARGS` avec les nouvelles valeurs |
-| `ModeSwitch … has N direct callers` / `not 8-byte aligned` | changement de codegen | le hook 8 octets suppose un unique appelant et un prologue de trois spills ; relire §70 de `docs/FINDINGS-2.00.md` |
+| `layout invariant failed: …` | la struct mode a changé de forme (pas seulement bougé) | relire `ModeSwitch` : les deux octets passés à `BuildModeTagList` sont mode/sous-mode ; les compares indexés donnent flags/subtypes ; `mov byte […],1` ×2 + `cmp …,0` donne dirty. Adapter les invariants si la forme est légitime |
+| `ModeSwitch … direct callers, expected 1..4` / `call sites disagree` | changement de codegen | l'offset de l'objet mode est lu sur l'instruction `mov r64,[r64+disp32]` qui précède chaque appel ; ils doivent concorder. Un prologue différent n'arrête plus le build : le hook reste désarmé (stage 2) |
 | `mainChar global is not unique` | le profil d'accès a changé | ajuster les offsets attendus dans `derive_mainchar` (comparer avec le tableau §68 des FINDINGS et le profil 2850 ci-dessus) |
 | `ResolveActor has no clear majority` | forme d'appel changée | inspecter les sites `rcx=[[mainChar]] ; call X` ; le corps doit contenir `mov rbx,rdx` et un `[rcx+0x50]` |
 | `CampWareHouse: expected one referenced copy` | une des copies de la chaîne a gagné/perdu ses xrefs | accepter tout préfixe REX sur le `lea` (déjà fait) ; sinon choisir celle référencée par du code |
@@ -117,7 +117,7 @@ MainCharGlobal: OK base+0x… (singleton scan, r0, modeOff=0x0)
 Pas de `FATAL`. Les avertissements suivants sont normaux : `SetTitleDir: FAIL`,
 `HGM string slot: WARN`, `Type resolver: DISABLED`, `StoreSubIndex: derive failed,
 keeping default 5`, `Gatherables panel-id lookup FAILED`, `[MODE] capture hook
-NOT armed (stage 3)`, `CHAN PRE/POST EXCEPTION`.
+NOT armed (stage 2 ou 3)`, `CHAN PRE/POST EXCEPTION`.
 
 **Panneaux (tous les builds)** — F4 puis Échap, puis F5…F9 :
 
@@ -189,6 +189,22 @@ blanc. Si BA donne des résultats incohérents, c'est ici qu'il faut regarder.
 | prologue de `ModeSwitch` = trois spills `48 89 5C 24 08 …` | hook de capture | asserté au build |
 
 ---
+
+## 6 bis. Retour d'expérience 2944 (20 septembre 2026)
+
+Deuxième portage, cinq jours après 2850 : `README`/`PORT-2944.md`. Ce qu'il a
+fallu apprendre au script, et qui sert de modèle pour la prochaine fois :
+
+| Symptôme | Cause | Correction |
+|---|---|---|
+| `STOP: tag pool found but 'store' is missing` | pool de chaînes réordonné | fenêtre de recherche ±0x200 dans `derive_modestate.find_tag_pool` |
+| `ingame=None` | bornes des tables de saut mal appariées | chaque table bornée par le `cmp` qui précède *son* dispatch |
+| `STOP: ModeSwitch prologue mismatch` | fonction recompilée | le hook de capture reste désarmé (stage 2), offset lu sur tous les appelants |
+| `BLOCKED: unsafe state (mode=0x07 sub=0x10)` sur tous les panneaux | un octet inséré entre mode et sous-mode ; la règle « deux stores adjacents » a pris le mauvais octet | mode/sous-mode = les deux octets passés à `BuildModeTagList`, sans exiger l'adjacence ; layout ré-émis (stub A, `dirty`, sonde) |
+
+Leçon : quand le log montre `BLOCKED` avec un `sub` plausible (`0x10`) mais un
+`mode` absurde, c'est l'offset du mode qui est faux, pas la route vers l'objet.
+Le `sub=0x10` prouve que l'objet est le bon.
 
 ## 7. Boîte à outils quand une ancre casse
 
