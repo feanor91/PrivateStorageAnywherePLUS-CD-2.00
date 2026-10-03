@@ -1,5 +1,15 @@
 # Changelog
 
+## Crimson Desert build 2976 (2026-10-03)
+
+No script change needed: `retarget_ay.py` re-derived every anchor on its own (ModeSwitch `0x640E20`, mode object `[parent+0x1188]`, layout `0x28/0x2A/0x32/0x39/0x5C`, mainChar `0x6D691E8`, InventoryInfoManager vtable `0x58BA0E8`). Built as `CD 2976.BB` (`4b4f7e3d…`).
+
+### Added
+
+- `MAJ-mod.bat` / `MAJ-mod.ps1`: one double-click rebuilds the mod for the installed game, backs up the previous ASI, installs the new one, and checks the INI setting. `-Test` builds the read-only dry run; `-Jeu <path>` overrides game detection.
+- `MAJ.md`: the three-step procedure in plain French, for use without reading the technical documents.
+
+
 ## Crimson Desert build 2944 re-targeting (2026-09-20)
 
 See [PORT-2944.md](PORT-2944.md). Script changes: tag-pool window widened, jump tables bounded per dispatch, mode/sub-mode taken from the BuildModeTagList arguments (a byte was inserted between them), layout re-emitted when it differs from AX, capture hook left disarmed when ModeSwitch's prologue changed, build tag from FileVersion. Tested: BB `930980fb…` — six panels, housing chests 1000, private storage 244/1000 with transfers.

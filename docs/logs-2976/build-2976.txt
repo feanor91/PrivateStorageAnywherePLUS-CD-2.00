@@ -1,0 +1,57 @@
+﻿deriving from D:\SteamLibrary\steamapps\common\Crimson Desert\bin64\CrimsonDesert.exe
+  [     7s] SizeOfImage 0x173ab000
+  [     7s] jump table game+0x640dc0 (7 entries): [4]=ingame-global
+  [     7s] jump table game+0x640ddc (17 entries): [2]=fadeout [3]=fadeout [4]=cinema/subtitle [5]=store [6]=hud-info/hud-play [7]=subtitle [10]=subtitle [11]=gimmick [14]=subtitle [15]=hud-info/hud-play [16]=hud-info/hud-play/interaction
+  [     7s] ModeSwitch prologue changed (48 89 5c 24 18 55 56 57 ...): the capture hook will refuse to arm at stage 2; the fallback route is used, as on 2850
+  [     8s] ModeSwitch has 2 direct caller(s), all loading the mode object from [parent+0x1188]
+  [     8s] ModeSwitch game+0x640e20  mode object at [parent+0x1188]
+  [     8s] layout mode=0x28 submode=0x2a flags=0x32 subtypes=0x39 dirty=0x5c  ingame=4 store=5
+  [     8s] game FileVersion build 2976
+  [    10s] mainChar profile: 983 loads, first-deref +0x0:285 +0xb0:177 +0x50:144 +0x90:94 +0xa0:84 +0x98:57 +0x30:28 +0x48:24
+  [    10s] mainChar global game+0x6d691e8
+  [    10s] ResolveActor votes: [('0x8b44e0', 172), ('0x8b4570', 80)]
+  [    10s] ResolveActor game+0x8b44e0
+  [    12s] CampWareHouse game+0x58b9df0
+  [    13s] InventoryInfoManager vtable game+0x58ba0e8
+  [    13s] manager globals: 90 distinct, 0x6d69a48..0x6d8a1e8
+  [    13s] manager scan window game+0x6d59000..0x6d9b000 (33792 qwords)
+
+patching
+  [    13s] layout stub (A)              rva 0x1467: mode/sub/flags/subtypes -> 0x28/0x2a/0x32/0x39
+  [    13s] dirty store [r9+0x5c]        x2 at ['0xaf7e', '0xb0f3']
+  [    13s] diagnostic probe fin         rva 0x47346: guards and reads re-emitted, shadow pair 0x51/0x52
+  [    13s] MainCharGlobal scanner       rva 0x9ae9: 32 bytes, direct store of game+0x6d691e8
+  [    13s] ModeSwitch (hook target)     rva 0x47133  48 05 20 0e 53 00 -> 48 05 20 0e 64 00
+  [    13s] ModeSwitch+0xF (stub return) rva 0x4708d  48 05 2f 0e 53 00 -> 48 05 2f 0e 64 00
+  [    13s] ResolveActor                 rva 0x4636c  48 05 90 bf 75 00 -> 48 05 e0 44 8b 00
+  [    13s] CampWareHouse                rva 0x461e4  48 8d 88 b8 c6 01 05 -> 48 8d 88 f0 9d 8b 05
+  [    13s] NameToKey (unreachable, zeroed) rva 0x461f0  48 05 50 7f e3 01 -> 48 05 00 00 00 00
+  [    13s] mode-obj disp mov rax,[rax+] x2 at ['0x1526', '0x47053']
+  [    13s] mode-obj disp lea rcx,[rcx+] x6 at ['0x47576', '0x47776', '0x477e4', '0x4787d', '0x478c0', '0x4792e']
+  [    13s] mode-obj disp mov rcx,[rcx+] x6 at ['0x47592', '0x47792', '0x47800', '0x47899', '0x478dc', '0x4794a']
+  [    13s] capacity gate                rva 0x461a2: left open (--f4 live)
+  [    13s] AZ block                     rva 0x47980: 931 bytes (boot=0x47af0 scan=0x47ba0 rdbl=0x47b30)
+  [    13s] inventory-mgr resolver       rva 0xa47e: jmp INVBOOT (INVMGR_PTR -> .psdata placeholder)
+  [    13s] wrapper entry                rva 0x4612a: call AW_HOOKINST -> call INVSCAN; slot patcher call kept
+  [    13s] F4 key                       rva 0x461dd: NameToKey call -> key=8, al=1
+  [    13s] F4 live: both game-memory stores active (AX behaviour)
+
+checks
+  [    13s] no stale 2.00 immediate survives
+  [    13s] all new values present
+  [    13s] PE shape unchanged (8 sections, 268288 bytes)
+  mainChar stub as assembled:
+     09AE9  48 8b 3d 60 38 03 00     mov rdi, qword ptr [rip + 0x33860]
+     09AF0  48 8d 97 e8 91 d6 06     lea rdx, [rdi + 0x6d691e8]
+     09AF7  48 89 15 1a 3a 03 00     mov qword ptr [rip + 0x33a1a], rdx
+     09AFE  45 31 c0                 xor r8d, r8d
+     09B01  45 31 c9                 xor r9d, r9d
+     09B04  e9 c4 00 00 00           jmp 0x180009bcd
+  capacity gate as assembled:
+     46198  48 8b 05 f9 73 ff ff     mov rax, qword ptr [rip - 0x8c07]
+     4619F  48 85 c0                 test rax, rax
+     461A2  0f 84 db 04 00 00        je 0x180046683
+
+input_sha256=c2b9848f33a3822532c563c31965f4dff74b0d02a369ae7626d3e43056c49840
+output_sha256=4b4f7e3d440886e0a44197345b3ad41c29df10f9c050f4eb0d0f7fdc90c75757
+wrote=D:\Repos\Private storage anywhere\PrivateStorageAnywherePLUS-CD-2.00\patched\PrivateStorageAnywhere-2976.BB.asi bytes=268288 tag=CD 2976.BB

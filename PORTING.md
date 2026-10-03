@@ -5,6 +5,11 @@ jour du jeu déplace ses adresses internes. Il a été écrit après le portage 
 release 2.00 (build AX) vers le build 2850 de septembre 2026 ; le détail
 technique de ce portage est dans [PORT-2850.md](PORT-2850.md).
 
+> **Raccourci** : sur la machine du mainteneur, `MAJ-mod.bat` enchaîne tout
+> seul les étapes 1 à 3 ci-dessous (construction, sauvegarde, installation,
+> vérification de l'INI). Voir [MAJ.md](MAJ.md). Ce document reste la référence
+> quand le script s'arrête sur un `STOP:`.
+
 Principe : on ne retape jamais une adresse. `tools/retarget_ay.py` prend l'ASI
 AX 2.00 (celui de Nexus) et le nouvel exécutable, **dérive** chaque valeur par
 sa forme dans le binaire, et s'arrête net (`STOP:`) dès qu'une ancre est
