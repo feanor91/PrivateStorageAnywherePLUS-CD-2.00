@@ -167,6 +167,14 @@ jeu, envoyer le log, remettre le `.bak`.
 
 ## 5. Pourquoi `PrivateStorageExpansions` ne doit pas rester à -1
 
+Et il doit rester **exact** : c'est le nombre d'extensions réellement
+achetées. S'il est trop bas, le mod rabote la capacité (le jeu calcule
+base + extensions, le mod force le total demandé). Observé le 2026-10-15 :
+l'INI disait 0, le joueur en avait acheté 100, et le journal montrait
+`[PRIV] container total 1100 -> 1000` — 100 places perdues à chaque ouverture.
+`MAJ-mod.ps1` compare désormais l'INI au `[PRIV] base=… exp=N` du dernier
+journal et prévient.
+
 Avec `-1` (défaut de la release), le mod attend la première ouverture de F4
 pour connaître le nombre d'extensions et écrire la base. Mais le conteneur de
 l'entrepôt est construit **au chargement de la sauvegarde**, avec la capacité

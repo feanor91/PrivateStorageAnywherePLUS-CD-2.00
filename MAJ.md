@@ -83,14 +83,24 @@ Nexus Mods → mod 388 → onglet Files → fichier « PrivateStoragePlus 2.00.0
 
 ```ini
 PrivateStorageSlots=1000
-PrivateStorageExpansions=0
+PrivateStorageExpansions=100
 ```
 
-`PrivateStorageExpansions` doit être le **nombre réel d'extensions d'entrepôt
-que tu as achetées** (0 si tu n'en as aucune). **Jamais `-1`.**
+- `PrivateStorageSlots` = le nombre total de places que tu veux dans
+  l'entrepôt privé (F4), extensions comprises.
+- `PrivateStorageExpansions` = le **nombre réel d'extensions d'entrepôt que tu
+  as achetées dans le jeu**. **Jamais `-1`.**
 
-Si tu mets `-1`, l'entrepôt affichera bien 1000 places mais refusera les
-transferts. Le script te prévient si ce réglage est mauvais.
+⚠️ **À remettre à jour quand tu achètes des extensions.** Si le chiffre est
+trop bas, le mod rabote ta capacité : le jeu calcule base + extensions, et le
+mod le ramène de force au total indiqué. Tu perds les places payées.
+
+Si tu mets `-1`, l'entrepôt affichera bien le bon total mais refusera les
+transferts.
+
+Le script vérifie les deux cas tout seul : il lit le nombre d'extensions que
+le mod a détecté pendant ta dernière partie et te prévient s'il ne correspond
+pas au réglage.
 
 ---
 

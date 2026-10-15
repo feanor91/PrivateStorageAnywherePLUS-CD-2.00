@@ -1,5 +1,12 @@
 # Changelog
 
+## INI expansion check (2026-10-15)
+
+`MAJ-mod.ps1` now reads the `[PRIV] base=… exp=N` line of the game's last log and warns when it disagrees with `PrivateStorageExpansions` in the INI. Buying expansions in game without updating that setting makes the mod force the container total back down (observed: `container total 1100 -> 1000`, 100 bought slots lost on every open). `MAJ.md` documents the rule.
+
+Not a mod bug, recorded for reference: the F9 "Collecting" panel is the game's valuables-collection display (`Dépôt d'objets de valeur`), not a chest. It shows `0 / 958` — items deposited out of all collectible valuables, with undiscovered ones as `?` — and items cannot be withdrawn by design. The housing slot patch does not apply to it, which is why the number is not 1000.
+
+
 ## Crimson Desert build 2976 (2026-10-03)
 
 No script change needed: `retarget_ay.py` re-derived every anchor on its own (ModeSwitch `0x640E20`, mode object `[parent+0x1188]`, layout `0x28/0x2A/0x32/0x39/0x5C`, mainChar `0x6D691E8`, InventoryInfoManager vtable `0x58BA0E8`). Built as `CD 2976.BB` (`4b4f7e3d…`).

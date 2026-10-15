@@ -132,14 +132,34 @@ Ok "nouvelle version installee"
 # -------------------------------------------------------------- 6. reglages
 Titre "6/6  Verification des reglages"
 if (Test-Path $ini) {
-    $exp = (Select-String -Path $ini -Pattern "^\s*PrivateStorageExpansions\s*=" | Select-Object -Last 1).Line
-    if ($exp -match "-1") {
+    $ligne = (Select-String -Path $ini -Pattern "^\s*PrivateStorageExpansions\s*=" | Select-Object -Last 1).Line
+    $valeurIni = $null
+    if ($ligne -match "=\s*(-?\d+)") { $valeurIni = [int]$Matches[1] }
+
+    # Le mod note dans son journal le nombre d'extensions qu'il detecte
+    # reellement. On le compare au reglage : c'est la seule facon de voir que
+    # le joueur a achete des extensions depuis la derniere fois.
+    $journalJeu = Join-Path $Jeu "PrivateStorageAnywhere.log"
+    $reel = $null
+    if (Test-Path $journalJeu) {
+        $m = Select-String -Path $journalJeu -Pattern "\[PRIV\] base=\d+ max=\d+ exp=(\d+)" | Select-Object -Last 1
+        if ($m) { $reel = [int]$m.Matches[0].Groups[1].Value }
+    }
+
+    if ($valeurIni -eq -1) {
         Write-Host "  ATTENTION  PrivateStorageExpansions=-1 dans le fichier INI." -ForegroundColor Yellow
-        Info "Mets le nombre reel d'extensions achetees (0 si tu n'en as pas)."
+        Info "Mets le nombre reel d'extensions d'entrepot achetees (0 si aucune)."
         Info "Sinon l'entrepot affichera 1000 mais refusera les transferts."
         Info "Fichier : $ini"
+    } elseif ($reel -ne $null -and $valeurIni -ne $null -and $reel -ne $valeurIni) {
+        Write-Host "  ATTENTION  le nombre d'extensions a change." -ForegroundColor Yellow
+        Info "INI : PrivateStorageExpansions=$valeurIni"
+        Info "Detecte par le mod lors de la derniere partie : $reel"
+        Info "Corrige la ligne en  PrivateStorageExpansions=$reel  dans :"
+        Info "$ini"
+        Info "Sinon tu perds les places d'extension que tu as achetees."
     } else {
-        Ok "reglages INI corrects ($($exp.Trim()))"
+        Ok "reglages INI corrects ($($ligne.Trim()))"
     }
 } else {
     Info "pas de fichier INI trouve (il sera cree au prochain lancement)"
