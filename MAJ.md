@@ -144,6 +144,13 @@ Utile pour comparer : si un comportement bizarre persiste dans ce mode, il ne
 vient pas de l'agrandissement. `MAJ-mod.bat` tout seul remet la version
 complète.
 
+Et pour ne désactiver **que** l'agrandissement des cinq coffres de maison, en
+gardant tout le reste (entrepôt privé compris) :
+
+```powershell
+.\MAJ-mod.ps1 -CoffresNormaux
+```
+
 ---
 
 ## Si le jeu n'est pas trouvé

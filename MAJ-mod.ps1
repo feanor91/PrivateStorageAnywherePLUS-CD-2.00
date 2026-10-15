@@ -8,6 +8,7 @@
 param(
     [switch]$Test,
     [switch]$SansAgrandissement,
+    [switch]$CoffresNormaux,
     [string]$Jeu
 )
 
@@ -99,6 +100,11 @@ if ($SansAgrandissement) {
     Info "mode SANS AGRANDISSEMENT : les touches F4-F9 ouvrent les panneaux,"
     Info "mais aucune capacite n'est modifiee (coffres et entrepot restent"
     Info "a leur taille normale). Sert a comparer."
+} elseif ($CoffresNormaux) {
+    $suffixe = "BC"; $options = @("--housing", "--no-chest-slots", "--f4", "live")
+    Info "mode COFFRES NORMAUX : tout fonctionne comme d'habitude, sauf que les"
+    Info "cinq coffres de maison gardent leur taille d'origine. Sert a verifier"
+    Info "si un comportement bizarre vient de l'agrandissement."
 } elseif ($Test) {
     $suffixe = "BA"; $options = @("--housing", "--f4", "dry")
     Info "mode TEST : le mod lira les valeurs sans rien modifier dans le jeu"

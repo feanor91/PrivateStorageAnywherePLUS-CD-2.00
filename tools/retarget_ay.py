@@ -50,7 +50,7 @@ stores (info base, container total) into nops, so the log shows what would be
 written; `live` is the AX behaviour.
 
 Usage:
-    python tools/retarget_ay.py <AX.asi> <output.asi> <CrimsonDesert.exe> [--housing] [--f4 dry|live]
+    python tools/retarget_ay.py <AX.asi> <output.asi> <CrimsonDesert.exe> [--housing] [--no-chest-slots] [--f4 dry|live]
 """
 from __future__ import annotations
 
@@ -821,12 +821,14 @@ def apply_housing(asi, pb, pv, slot_call, inv_vt, win_lo, win_hi):
 
 def main():
     housing = "--housing" in sys.argv
+    no_chests = "--no-chest-slots" in sys.argv
     f4 = None
     if "--f4" in sys.argv:
         f4 = sys.argv[sys.argv.index("--f4") + 1]
         if f4 not in ("dry", "live") or not housing:
             raise SystemExit(__doc__)
-    args = [a for a in sys.argv[1:] if a not in ("--housing", "--f4", "dry", "live")]
+    args = [a for a in sys.argv[1:]
+            if a not in ("--housing", "--no-chest-slots", "--f4", "dry", "live")]
     if len(args) != 3:
         raise SystemExit(__doc__)
     src, dst, exe = Path(args[0]), Path(args[1]), Path(args[2])
@@ -931,6 +933,14 @@ def main():
         note(f"housing slot patcher call    rva {calls[0]:#x}: call -> xor eax,eax (returns 0 entries)")
     else:
         apply_housing(asi, pb, pv, calls[0], inv_vt, win_lo, win_hi)
+        if no_chests:
+            # Keep the whole runtime machinery (manager lookup, worker, F4
+            # path) but stop the 10 -> 1000 rewrite of the five Housing_*
+            # entries. One of those five is the game's valuables-collection
+            # display, and enlarging it appears to reveal the full
+            # collectible catalogue -- this isolates that single effect.
+            asi.img[asi.off(calls[0]):asi.off(calls[0]) + 5] = bytes.fromhex("31C0909090")
+            note(f"housing slot patch           rva {calls[0]:#x}: DISABLED (--no-chest-slots)")
     if f4 is not None:
         apply_f4(asi, f4)
 
@@ -939,6 +949,8 @@ def main():
     if at < 0 or bytes(asi.img).find(OLD_TAG, at + 1) >= 0:
         fail("build tag not unique")
     suffix = {None: "AZ" if housing else "AY", "dry": "BA", "live": "BB"}[f4]
+    if no_chests:
+        suffix = "BC"
     tag = f"CD {build}.{suffix}".encode()
     if len(tag) != len(OLD_TAG):
         fail(f"build tag {tag!r} is not {len(OLD_TAG)} bytes")

@@ -1,5 +1,10 @@
 # Changelog
 
+## Housing-chest expansion can be turned off on its own (2026-10-15)
+
+`--no-chest-slots` (script: `-CoffresNormaux`) keeps the whole runtime machinery and the private-storage feature but stops the 10 -> 1000 rewrite of the five Housing_* entries, which differs from the full build by a single instruction. One of those five entries is the game's valuables-collection display; a player reported that it shows the icons of collectibles they do not own, and that it has done so since the mod was installed. This isolates that effect without giving up the rest of the mod.
+
+
 ## Panels-only build mode (2026-10-15)
 
 `MAJ-mod.ps1 -SansAgrandissement` builds and installs the AY variant: F4-F9 open every panel, no capacity is touched. It separates "the hotkeys work" from "the expansion changed something", without disabling the mod entirely.
