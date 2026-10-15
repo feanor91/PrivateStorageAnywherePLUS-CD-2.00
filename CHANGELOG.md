@@ -1,5 +1,10 @@
 # Changelog
 
+## Mod on/off switch (2026-10-15)
+
+`Mod-OnOff.bat` / `Mod-OnOff.ps1` renames the installed ASI in and out of place, with the same game-is-closed guard as the update script. It answers the first question any mod report needs: is this behaviour the mod, or the game? `MAJ.md` documents the five-minute comparison.
+
+
 ## INI expansion check (2026-10-15)
 
 `MAJ-mod.ps1` now reads the `[PRIV] base=… exp=N` line of the game's last log and warns when it disagrees with `PrivateStorageExpansions` in the INI. Buying expansions in game without updating that setting makes the mod force the container total back down (observed: `container total 1100 -> 1000`, 100 bought slots lost on every open). `MAJ.md` documents the rule.

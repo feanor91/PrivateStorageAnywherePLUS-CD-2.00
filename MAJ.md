@@ -104,6 +104,22 @@ pas au réglage.
 
 ---
 
+## Un truc bizarre en jeu ? D'abord : est-ce le mod, ou le jeu ?
+
+C'est la première question à se poser, et elle se tranche en 5 minutes.
+
+1. Ferme le jeu.
+2. Double-clique sur **`Mod-OnOff.bat`** → il affiche « le mod est maintenant
+   DESACTIVE ». (Rien n'est supprimé, le fichier est juste renommé.)
+3. Lance le jeu et va voir la même chose **sans le mod** : rends-toi sur place
+   et ouvre le coffre normalement, puisque F4–F9 ne répondent plus.
+4. Compare avec ce que tu voyais avant.
+5. Ferme le jeu, re-double-clique sur `Mod-OnOff.bat` → « le mod est
+   maintenant ACTIF ».
+
+Si c'est pareil sans le mod, c'est le jeu qui est comme ça. Sinon, envoie-moi
+ce que tu as vu dans les deux cas.
+
 ## Mode prudent (facultatif)
 
 Si tu préfères vérifier avant de laisser le mod modifier quoi que ce soit,
