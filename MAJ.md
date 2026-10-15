@@ -133,6 +133,17 @@ ouvre PowerShell dans le dossier et tape :
 journal, sans rien modifier. L'entrepôt restera à sa taille normale. Envoie le
 journal à Claude, et s'il est correct, relance `MAJ-mod.bat` normalement.
 
+Et pour garder les touches F4–F9 **sans aucun agrandissement** (coffres et
+entrepôt à leur taille d'origine) :
+
+```powershell
+.\MAJ-mod.ps1 -SansAgrandissement
+```
+
+Utile pour comparer : si un comportement bizarre persiste dans ce mode, il ne
+vient pas de l'agrandissement. `MAJ-mod.bat` tout seul remet la version
+complète.
+
 ---
 
 ## Si le jeu n'est pas trouvé

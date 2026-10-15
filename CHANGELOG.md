@@ -1,5 +1,10 @@
 # Changelog
 
+## Panels-only build mode (2026-10-15)
+
+`MAJ-mod.ps1 -SansAgrandissement` builds and installs the AY variant: F4-F9 open every panel, no capacity is touched. It separates "the hotkeys work" from "the expansion changed something", without disabling the mod entirely.
+
+
 ## Mod on/off switch (2026-10-15)
 
 `Mod-OnOff.bat` / `Mod-OnOff.ps1` renames the installed ASI in and out of place, with the same game-is-closed guard as the update script. It answers the first question any mod report needs: is this behaviour the mod, or the game? `MAJ.md` documents the five-minute comparison.

@@ -7,6 +7,7 @@
 
 param(
     [switch]$Test,
+    [switch]$SansAgrandissement,
     [string]$Jeu
 )
 
@@ -93,16 +94,21 @@ Ok "Python pret"
 Titre "4/6  Construction du mod pour le build $build"
 $patched = Join-Path $repo "patched"
 if (-not (Test-Path $patched)) { New-Item -ItemType Directory $patched | Out-Null }
-if ($Test) {
-    $mode = "dry"; $suffixe = "BA"
+if ($SansAgrandissement) {
+    $suffixe = "AY"; $options = @()
+    Info "mode SANS AGRANDISSEMENT : les touches F4-F9 ouvrent les panneaux,"
+    Info "mais aucune capacite n'est modifiee (coffres et entrepot restent"
+    Info "a leur taille normale). Sert a comparer."
+} elseif ($Test) {
+    $suffixe = "BA"; $options = @("--housing", "--f4", "dry")
     Info "mode TEST : le mod lira les valeurs sans rien modifier dans le jeu"
 } else {
-    $mode = "live"; $suffixe = "BB"
+    $suffixe = "BB"; $options = @("--housing", "--f4", "live")
 }
 $sortie = Join-Path $patched "PrivateStorageAnywhere-$build.$suffixe.asi"
 $journal = Join-Path $patched "build-$build.txt"
 
-& $py -u (Join-Path $repo "tools\retarget_ay.py") $ax $sortie $exe --housing --f4 $mode 2>&1 |
+& $py -u (Join-Path $repo "tools\retarget_ay.py") $ax $sortie $exe @options 2>&1 |
     Tee-Object -FilePath $journal | ForEach-Object {
         if     ($_ -match "^STOP:")             { Write-Host "      $_" -ForegroundColor Red }
         elseif ($_ -match "sha256|wrote|layout|ModeSwitch|mainChar") { Write-Host "      $_" -ForegroundColor Gray }
