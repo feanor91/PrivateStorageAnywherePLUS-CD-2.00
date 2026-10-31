@@ -205,7 +205,7 @@ C'est l'intérêt de numéroter : la réponse est arrivée en un seul essai.
 | Hypothèse | Où | Validation par BA |
 |---|---|---|
 | InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` — ✅ **toujours juste sur 3460** (l'étape 7 n'a pas déclenché : la clé 8 est bien dans le bucket) |
-| entrée InventoryInfo : `word +0x48` base, `word +0x4A` max | wrapper AX, patcheur housing | idem, et `5 entries` — ❌ **FAUSSE sur 3460** : `word +0x48` vaut 6144 (étape 12), et c'est aussi pourquoi le patcheur de coffres renvoie 0 |
+| entrée InventoryInfo : base et max | wrapper AX, patcheur housing | `base=240 max=1000`, et `5 entries` — ❌ **a bougé sur 3460** : `+0x48/+0x4A` → **`+0x10/+0x14`** (plus adjacents). C'est `ENTRY_BASE`/`ENTRY_MAX` dans le script, appliqué à 7 sites. Se redérive avec `--dump-mgr` |
 | gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée — ✅ **toujours juste sur 3460** (étapes 3-4 et 9-10 passées ; le compte est passé de 18 à 24) |
 | conteneur : `word +0x10` index, `+0x14` total, `+0x16`, `+0x1A` extensions | wrapper AX | `tot` = capacité affichée |
 | propriétaire : `+0x18` tableau, `+0x20` compte ; `[[acteur+0x68]+0xB8]` | wrapper AX | `owner=…`, `n=18` |
@@ -298,12 +298,29 @@ donc il n'a rien corrigé. Et **demander à l'utilisateur les chiffres affichés
 en jeu** a coûté dix secondes et corrigé le diagnostic.
 
 Les deux pannes lisent la même structure : le patcheur veut `[mgr+0x58]`
-(tableau), `[mgr+8]` (compte) et `word [entrée+0x48]` (capacité de base, qu'il
+(tableau), `[mgr+8]` (compte) et la capacité de base de l'entrée (qu'il
 réécrit de 10 à 1000) ; le parcours veut en plus `[mgr+0x68]/[mgr+0x6C]/
-[mgr+0x78]`. Un seul offset déplacé explique tout. Le build installé le dit :
-douze numéros d'étape, le relevé du gestionnaire (`[DBG] mgr+…`, une
-indirection de profondeur, chaque déréférencement protégé par `VirtualQuery`)
-et la valeur de retour du patcheur.
+[mgr+0x78]`. **Résolu en deux mesures** :
+
+1. Les douze numéros d'étape ont donné **étape 12** — la dernière. Tout le
+   reste de la chaîne est donc innocenté, `CAMP_KEY = 8` compris.
+2. Le relevé des 24 entrées (`--dump-mgr`) a localisé la paire : `dword
+   [entrée+8]` est la clé (l'entrée *j* porte la clé *j+1*), donc la clé 8 est
+   `entry[7]`, et elle lit **240 à +0x10** et **1000 à +0x14** — exactement le
+   `base=240 max=1000` des versions qui marchaient, deux nombres connus qui
+   tombent ensemble. AX les lisait à `+0x48/+0x4A`.
+
+Correction : 7 sites, tous en déplacement 8 bits, donc seul l'octet de
+déplacement change — longueur et garde-fous intacts. Et les deux écritures
+sont auto-limitées, ce qui rend un mauvais offset inoffensif plutôt que
+destructeur : le parcours n'écrit qu'après que les étapes 11 et 12 ont accepté
+la valeur comme une capacité entre 1 et 2000, et le patcheur n'écrit que là où
+il a lu exactement 10.
+
+À surveiller : le patcheur trouve maintenant **huit** inventaires à 10 et non
+cinq (le jeu a ajouté les entrepôts Spagnola, Xamaca et Dragnar), et le code
+propriétaire/conteneur situé après l'étape 12 n'a encore jamais tourné sur
+3460.
 
 Deux choses apprises en cherchant la clé statiquement, pour ne pas les
 refaire : le pool de noms `InventoryInfoKey` est à `game+0x5C64760` (22 noms,

@@ -50,7 +50,11 @@ stores (info base, container total) into nops, so the log shows what would be
 written; `live` is the AX behaviour.
 
 Usage:
-    python tools/retarget_ay.py <AX.asi> <output.asi> <CrimsonDesert.exe> [--housing] [--no-chest-slots] [--f4 dry|live]
+    python tools/retarget_ay.py <AX.asi> <output.asi> <CrimsonDesert.exe> [--housing] [--no-chest-slots] [--f4 dry|live] [--dump-mgr]
+
+--dump-mgr adds a one-shot dump of the InventoryInfoManager and all its
+entries to the log -- four hundred lines, for re-deriving the entry layout
+when the capacity offsets move again (see ENTRY_SITES and PORT-3460.md).
 """
 from __future__ import annotations
 
@@ -113,6 +117,24 @@ PRIV_FAIL_SITES = (
 PRIV_FAIL_MSG = 0x46683      # the shared message site the twelve jump to
 PRIV_DONE = 0x4669A          # ... which falls into this return
 PRIV_KEY_SET = 0x46205       # `mov [rsp+0x48],eax`: the key, so stages 1-5 print garbage for it
+
+# InventoryInfo entry: AX reads the current capacity at `word +0x48` and the
+# ceiling at `word +0x4A`, adjacent. Build 3460 moved them to +0x10 and +0x14,
+# four bytes apart, derived from the 24-entry dump: the CampWareHouse entry
+# (key 8, `dword [entry+8]`) reads 240 at +0x10 and 1000 at +0x14, which is
+# exactly the `base=240 max=1000` pair every working build logged, and eight
+# entries read 10 at +0x10, which is what the slot patcher hunts for. Each
+# site keeps its length -- both offsets still fit a disp8.
+ENTRY_BASE, ENTRY_MAX = 0x10, 0x14
+ENTRY_SITES = (
+    (0x4628D, 3, "0f b7 41 48", "base"),      # the stage 11/12 guard
+    (0x46515, 4, "44 0f b7 41 4a", "max"),    # `[PRIV] base=%d max=%d`
+    (0x4651A, 3, "0f b7 51 48", "base"),      # ... and its base
+    (0x465A0, 3, "0f b7 41 48", "base"),      # read before the write
+    (0x465AC, 3, "66 89 51 48", "base"),      # the write (nopped by --f4 dry)
+    (0x08789, 3, "66 83 78 48 0a", "base"),   # slot patcher: is it 10?
+    (0x08790, 4, "66 44 89 58 48", "base"),   # slot patcher: make it 1000
+)
 SLOT_CALL = 0x4612F          # `call SLOT_PATCHER` in the wrapper, before the walk
 PRIV_GAP = 0x46850           # unreferenced zero padding between AX's data and its next block
 PRIV_GAP_END = 0x47000
@@ -728,6 +750,22 @@ def apply_layout(asi, lay):
     note(f"diagnostic probe fin         rva {asi.rva(hits[0]):#x}: guards and reads re-emitted, shadow pair {shadow[0]:#x}/{shadow[1]:#x}")
 
 
+def apply_entry_offsets(asi):
+    """Move every read and write of the entry's capacity pair to its new home.
+
+    This is the whole fix for build 3460: the walk reached its last test and
+    refused because `word [entry+0x48]` read 6144, and the slot patcher
+    returned 0 because no entry held 10 there. Seven sites, all with an 8-bit
+    displacement, so only the displacement byte changes and every instruction
+    keeps its length and its guards."""
+    for rva, at, want, which in ENTRY_SITES:
+        asi.expect(rva, want)
+        off = ENTRY_BASE if which == "base" else ENTRY_MAX
+        asi.img[asi.off(rva) + at] = off
+    note(f"InventoryInfo entry offsets  base +{ENTRY_BASE:#04x} max +{ENTRY_MAX:#04x} "
+         f"(AX: +0x48/+0x4A) at {len(ENTRY_SITES)} sites")
+
+
 def apply_f4(asi, mode):
     """Reopen the AX private-storage path with a constant CampWareHouse key.
 
@@ -751,18 +789,22 @@ def apply_f4(asi, mode):
     new = bytes.fromhex("66C7442428") + struct.pack("<H", CAMP_KEY) + b"\xB0\x01" + b"\x90" * 18
     asi.img[o:o + 27] = new
     note(f"F4 key                       rva {asi.rva(o):#x}: NameToKey call -> key={CAMP_KEY}, al=1")
+    # The info base store carries the entry offset apply_entry_offsets just
+    # moved, so the pattern follows it rather than AX's 0x48. The container
+    # total store (+0x14) is a different struct and does not move.
+    info_store = "668951%02x" % ENTRY_BASE
     if mode == "dry":
-        asi.replace_unique(bytes.fromhex("66895148"), b"\x90" * 4, "F4 dry: info base store")
+        asi.replace_unique(bytes.fromhex(info_store), b"\x90" * 4, "F4 dry: info base store")
         asi.replace_unique(bytes.fromhex("66894114"), b"\x90" * 4, "F4 dry: container total store")
     else:
-        for pat in ("66895148", "66894114"):
+        for pat in (info_store, "66894114"):
             if bytes(asi.img).count(bytes.fromhex(pat)) != 1:
                 fail(f"F4 live: store {pat} not unique")
         note("F4 live: both game-memory stores active (AX behaviour)")
-    apply_priv_diag(asi)
+    apply_priv_diag(asi, "--dump-mgr" in sys.argv)
 
 
-def apply_priv_diag(asi):
+def apply_priv_diag(asi, dump_mgr):
     """Say which of the twelve refusals fired, and what the manager looks like.
 
     Two things fail on build 3460, and the log says almost nothing about
@@ -784,16 +826,16 @@ def apply_priv_diag(asi):
         eax. The key and eax are meaningful from stage 6 on; before
         PRIV_KEY_SET the key slot is uninitialised, so stages 1-5 print
         whatever is on the stack.
-      * the two stages where rax still holds the manager dump it on the way
-        out, and so does the slot patcher's call site, which is wrapped so the
-        dump runs before the patcher and its return value is logged (once per
-        distinct value -- the worker thread calls it every second).
-
-    The dump walks `mgr+0x00..0xF8` as qwords and, for any that `rdbl` says
-    points at readable memory whose own first qword is also readable, prints
-    sixteen qwords from there. That is one indirection past the manager, so a
-    field holding the entry array shows the first entry's header, where a `10`
-    is the capacity word the patcher is looking for.
+      * the slot patcher's call site is wrapped so its return value is logged,
+        once per distinct value -- the worker thread calls it every second.
+      * with `--dump-mgr`, the manager's own first 32 qwords are printed, then
+        all 24 entries three levels down (`[[mgr+0x58] + j*8] + k*8`), which is
+        what located the capacity pair. It is off by default: four hundred
+        lines per session is not something to ship, and the stage number plus
+        the patcher's result are enough to notice a regression. The two stages
+        where rax still holds the manager call the dump on their way out.
+        Every deref is behind `rdbl`, so a wrong guess logs nothing rather
+        than crashing.
 
     It lives in the 1984 bytes of zero padding between AX's string pool (ends
     at 0x4683F) and its next block (0x47000) -- unreferenced: no branch and no
@@ -805,15 +847,20 @@ def apply_priv_diag(asi):
         fail(f"the .pstext padding at {PRIV_GAP:#x} is not empty")
     if not hasattr(asi, "rdbl"):
         fail("apply_priv_diag needs the AZ block's rdbl helper (--housing)")
+    # --no-chest-slots has already replaced the call with `xor eax,eax`, so
+    # there is nothing to wrap and no return value to report.
+    slot_live = bytes(asi.img[asi.off(SLOT_CALL):asi.off(SLOT_CALL) + 5]) != bytes.fromhex("31C0909090")
 
     e = Emit(free)
+    strings = [("stage", b"  [PRIV] no entry: stage %u key %u ax %u")]
+    if slot_live:
+        strings += [("slots", b"  [DBG] slot patcher -> %d")]
+    if dump_mgr:
+        strings += [("mgr", b"  [DBG] mgr+%02X = %016llX"),
+                    ("ent", b"  [DBG] entry[%u] = %016llX"),
+                    ("word", b"  [DBG]   entry[%u] +%02X = %016llX")]
     fmt = {}
-    for name, txt in (
-            ("stage", b"  [PRIV] no entry: stage %u key %u ax %u"),
-            ("mgr", b"  [DBG] mgr+%02X = %016llX"),
-            ("ent", b"  [DBG] entry[%u] = %016llX"),
-            ("word", b"  [DBG]   entry[%u] +%02X = %016llX"),
-            ("slots", b"  [DBG] slot patcher -> %d")):
+    for name, txt in strings:
         fmt[name] = e.here()
         e.raw(txt + b"\x00")
         e.align(4, b"\x00")
@@ -823,7 +870,7 @@ def apply_priv_diag(asi):
     stubs = {}
     for _, _, stage, dump in PRIV_FAIL_SITES:
         stubs[stage] = e.here()
-        if dump:
+        if dump and dump_mgr:
             e.h("48 89 C1")                      # mov rcx,rax  (the manager)
             e.j("E8", "dump")
         e.h("BA" + struct.pack("<I", stage).hex())
@@ -840,24 +887,54 @@ def apply_priv_diag(asi):
     # PW: replaces `call SLOT_PATCHER`. Dumps the manager first, then calls the
     # patcher and logs what it returned. 0x28 keeps the alignment the patcher
     # arrives with and covers the shadow space of all three calls.
-    e.align(16)
-    e.label("pw")
-    e.h("48 83 EC 28")
-    e.rip("48 8B 05", INVMGR_PTR); e.h("48 85 C0"); e.j("0F 84", "pwrun")
-    e.h("48 8B 08"); e.h("48 85 C9"); e.j("0F 84", "pwrun")
-    e.j("E8", "dump")
-    e.label("pwrun")
-    e.rip("E8", SLOT_PATCHER)
-    e.rip("89 05", PS_RET)
-    e.rip("3B 05", PS_LAST); e.j("0F 84", "pwout")
-    e.rip("89 05", PS_LAST)
-    e.h("89 C2")
-    e.rip("48 8D 0D", fmt["slots"]); e.rip("E8", LOGGER)
-    e.label("pwout")
-    e.rip("8B 05", PS_RET)
-    e.h("48 83 C4 28"); e.h("C3")
+    if slot_live:
+        e.align(16)
+        e.label("pw")
+        e.h("48 83 EC 28")
+        if dump_mgr:
+            e.rip("48 8B 05", INVMGR_PTR); e.h("48 85 C0"); e.j("0F 84", "pwrun")
+            e.h("48 8B 08"); e.h("48 85 C9"); e.j("0F 84", "pwrun")
+            e.j("E8", "dump")
+        e.label("pwrun")
+        e.rip("E8", SLOT_PATCHER)
+        e.rip("89 05", PS_RET)
+        e.rip("3B 05", PS_LAST); e.j("0F 84", "pwout")
+        e.rip("89 05", PS_LAST)
+        e.h("89 C2")
+        e.rip("48 8D 0D", fmt["slots"]); e.rip("E8", LOGGER)
+        e.label("pwout")
+        e.rip("8B 05", PS_RET)
+        e.h("48 83 C4 28"); e.h("C3")
 
     # DUMPMGR(rcx = manager), once per session.
+    if not dump_mgr:
+        e.label("dump")
+    if dump_mgr:
+        emit_dump(e, asi, fmt)
+
+    code = e.finish()
+    if free + len(code) > PRIV_GAP_END:
+        fail(f"[PRIV] diagnostics overrun the padding ({len(code)} bytes at {free:#x})")
+    asi.img[asi.off(free):asi.off(free) + len(code)] = code
+    struct.pack_into("<I", asi.img, asi.off(PS_LAST), PS_LAST_INIT)
+
+    for rva, opc, stage, _ in PRIV_FAIL_SITES:
+        asi.expect(rva, opc + struct.pack("<i", PRIV_FAIL_MSG - (rva + 6)).hex())
+        at = asi.off(rva) + 2
+        asi.img[at:at + 4] = struct.pack("<i", stubs[stage] - (rva + 6))
+    if slot_live:
+        asi.expect(SLOT_CALL, "e8" + struct.pack("<i", SLOT_PATCHER - (SLOT_CALL + 5)).hex())
+        at = asi.off(SLOT_CALL) + 1
+        asi.img[at:at + 4] = struct.pack("<i", free + e.lbl["pw"] - (SLOT_CALL + 5))
+    note(f"[PRIV] diagnostics           rva {free:#x}: {len(code)} bytes in the padding; "
+         f"{len(PRIV_FAIL_SITES)} refusals numbered"
+         f"{', slot patcher result logged' if slot_live else ''}"
+         f"{', manager dumped (--dump-mgr)' if dump_mgr else ''} "
+         f"({PRIV_GAP_END - free - len(code)} bytes of padding left)")
+
+
+def emit_dump(e, asi, fmt):
+    """The --dump-mgr block: the manager's fields, then all 24 entries."""
     e.align(16)
     e.label("dump")
     e.h("48 83 EC 38")
@@ -904,23 +981,6 @@ def apply_priv_diag(asi):
     e.h("83 F8 18"); e.j("0F 82", "l2")          # dword [mgr+8] reads 24
     e.label("dmpout")
     e.h("48 83 C4 38"); e.h("C3")
-
-    code = e.finish()
-    if free + len(code) > PRIV_GAP_END:
-        fail(f"[PRIV] diagnostics overrun the padding ({len(code)} bytes at {free:#x})")
-    asi.img[asi.off(free):asi.off(free) + len(code)] = code
-    struct.pack_into("<I", asi.img, asi.off(PS_LAST), PS_LAST_INIT)
-
-    for rva, opc, stage, _ in PRIV_FAIL_SITES:
-        asi.expect(rva, opc + struct.pack("<i", PRIV_FAIL_MSG - (rva + 6)).hex())
-        at = asi.off(rva) + 2
-        asi.img[at:at + 4] = struct.pack("<i", stubs[stage] - (rva + 6))
-    asi.expect(SLOT_CALL, "e8" + struct.pack("<i", SLOT_PATCHER - (SLOT_CALL + 5)).hex())
-    at = asi.off(SLOT_CALL) + 1
-    asi.img[at:at + 4] = struct.pack("<i", free + e.lbl["pw"] - (SLOT_CALL + 5))
-    note(f"[PRIV] diagnostics           rva {free:#x}: {len(code)} bytes in the padding; "
-         f"{len(PRIV_FAIL_SITES)} refusals numbered, manager dumped once, "
-         f"slot patcher's result logged ({PRIV_GAP_END - free - len(code)} bytes of padding left)")
 
 
 def apply_canshow(asi):
@@ -1197,7 +1257,7 @@ def main():
         if f4 not in ("dry", "live") or not housing:
             raise SystemExit(__doc__)
     args = [a for a in sys.argv[1:]
-            if a not in ("--housing", "--no-chest-slots", "--f4", "dry", "live")]
+            if a not in ("--housing", "--no-chest-slots", "--f4", "dry", "live", "--dump-mgr")]
     if len(args) != 3:
         raise SystemExit(__doc__)
     src, dst, exe = Path(args[0]), Path(args[1]), Path(args[2])
@@ -1338,6 +1398,9 @@ def main():
         note(f"housing slot patcher call    rva {calls[0]:#x}: call -> xor eax,eax (returns 0 entries)")
     else:
         apply_housing(asi, pb, pv, calls[0], inv_vt, win_lo, win_hi)
+        # The entry's capacity pair moved on 3460; both the slot patcher and
+        # the F4 walk read it, so this applies to every build that has either.
+        apply_entry_offsets(asi)
         if no_chests:
             # Keep the whole runtime machinery (manager lookup, worker, F4
             # path) but stop the 10 -> 1000 rewrite of the five Housing_*
