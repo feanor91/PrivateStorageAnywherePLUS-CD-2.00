@@ -90,21 +90,32 @@ SLOT_PATCHER = 0x8720
 OLD_TAG = b"CD 2.00.AX"        # the tag is 10 bytes; ours is "CD <build>.<XY>"
 CAMP_KEY = 8                 # InventoryKey::CampWareHouse (2.00 value; see --f4 in the docstring)
 
-# The private-storage bucket walk in AX's own .pstext wrapper. Seven separate
-# tests all branch to one `[PRIV] no entry` message, so a failure says nothing
-# about which of them refused. apply_priv_diag gives each its own stage number.
-# Each entry is (rva, the jcc's two opcode bytes, stage).
+# The private-storage wrapper in AX's own .pstext. Twelve separate tests all
+# branch to one `[PRIV] no entry` message, so a failure says nothing about
+# which of them refused. apply_priv_diag gives each its own stage number, in
+# code order. `dump` marks the two sites where rax still holds the manager,
+# so the stub can dump its fields on the way out.
+# Each entry is (rva, the jcc's two opcode bytes, stage, dump).
 PRIV_FAIL_SITES = (
-    (0x46230, "0f 84", 1),   # bucket for this key is empty
-    (0x4623b, "0f 83", 2),   # walked the bucket, key not in it
-    (0x46264, "0f 83", 3),   # entry index past [mgr+8]
-    (0x46275, "0f 84", 4),   # entry array [mgr+0x58] null
-    (0x46282, "0f 84", 5),   # entry pointer null
-    (0x46293, "0f 84", 6),   # base capacity word [entry+0x48] is 0
-    (0x4629e, "0f 87", 7),   # ... or over 0x7D0
+    (0x461A2, "0f 84",  1, False),  # [INVMGR_PTR] still null
+    (0x461AE, "0f 84",  2, False),  # the manager itself null
+    (0x461B8, "0f 84",  3, True),   # dword [mgr+0x6C] == 0
+    (0x461C2, "0f 84",  4, True),   # dword [mgr+0x68] == 0  (bucket count)
+    (0x461FA, "0f 84",  5, False),  # NameToKey false -- unreachable under --f4
+    (0x46230, "0f 84",  6, False),  # bucket for this key is empty
+    (0x4623B, "0f 83",  7, False),  # walked the bucket, key not in it
+    (0x46264, "0f 83",  8, False),  # entry index past [mgr+8]
+    (0x46275, "0f 84",  9, False),  # entry array [mgr+0x58] null
+    (0x46282, "0f 84", 10, False),  # entry pointer null
+    (0x46293, "0f 84", 11, False),  # base capacity word [entry+0x48] is 0
+    (0x4629E, "0f 87", 12, False),  # ... or over 0x7D0
 )
-PRIV_FAIL_MSG = 0x46683      # the shared message site the seven jump to
+PRIV_FAIL_MSG = 0x46683      # the shared message site the twelve jump to
 PRIV_DONE = 0x4669A          # ... which falls into this return
+PRIV_KEY_SET = 0x46205       # `mov [rsp+0x48],eax`: the key, so stages 1-5 print garbage for it
+SLOT_CALL = 0x4612F          # `call SLOT_PATCHER` in the wrapper, before the walk
+PRIV_GAP = 0x46850           # unreferenced zero padding between AX's data and its next block
+PRIV_GAP_END = 0x47000
 GAME_SIZE = 0x3D358          # qword: game SizeOfImage
 LOGGER = 0x6DE0              # printf-style log sink
 INV_SCAN_ENTRY = 0xA47E      # inventory-manager resolver: scan entry (fall-through only)
@@ -133,6 +144,14 @@ VT_STORE_CONT = 0x996C       # ... and the instruction after it
 IAT_VIRTUALPROTECT = 0x280C8
 PS_CANSLOT = PD_RVA + 72     # qword: address of the slot CanShow was read from
 PS_CANORIG = PD_RVA + 80     # qword: what that slot held -- CanShow, or a thunk to it
+PS_DMPD = PD_RVA + 88        # dword: the manager has already been dumped once
+PS_MGR = PD_RVA + 96         # qword: the manager, while the dump walks it
+PS_I = PD_RVA + 104          # dword: outer index
+PS_P = PD_RVA + 112          # qword: the pointer the inner loop is reading
+PS_K = PD_RVA + 120          # dword: inner index
+PS_RET = PD_RVA + 128        # dword: the slot patcher's return value
+PS_LAST = PD_RVA + 132       # dword: ... as last logged; preset to a value it cannot return
+PS_LAST_INIT = 0x7FFFFFFF
 
 
 def fail(msg):
@@ -612,9 +631,12 @@ class Emit:
     def raw(self, b):
         self.code.extend(b)
 
-    def rip(self, hexs, target):          # opcode + rel32 to an absolute rva
+    def rip(self, hexs, target, tail=0):  # opcode + rel32 to an absolute rva
+        # `tail` is how many immediate bytes follow the rel32 (`C7 05 d imm32`
+        # and friends): RIP is the end of the whole instruction, not of the
+        # displacement, so the caller states the difference.
         self.h(hexs)
-        self.fix.append((len(self.code), target, 0))
+        self.fix.append((len(self.code), target, tail))
         self.code.extend(bytes(4))
 
     def j(self, hexs, label):             # branch to a local label
@@ -739,56 +761,149 @@ def apply_f4(asi, mode):
 
 
 def apply_priv_diag(asi):
-    """Give each of the bucket walk's seven refusals its own stage number.
+    """Say which of the twelve refusals fired, and what the manager looks like.
 
-    AX logs one `[PRIV] no entry` for all of them, which on build 3460 is the
-    whole of what the log says about why the private warehouse stays at its
-    game size. The seven tests fail for quite different reasons -- a key that
-    is not in the manager's table (1, 2) versus a struct offset that has moved
-    (3..7) -- and they need different fixes, so the message has to tell them
-    apart.
+    Two things fail on build 3460, and the log says almost nothing about
+    either. The housing slot patcher returns <= 0, so its
+    `InventoryInfo slot patch: N entries default 10 -> 1000` line -- present on
+    2850 and 2976 -- never appears, and the five chests keep their native ten
+    slots. And the private-storage walk ends in `[PRIV] no entry`, which twelve
+    different tests share.
 
-    Each `jcc <shared message>` keeps its opcode and length; only its rel32 is
-    aimed at a ten-byte stub that sets the stage number and jumps to a common
-    tail. The tail keeps AX's verbose check, prints the stage with the key and
-    eax (the base capacity at stages 6 and 7, uninteresting at the others),
-    and falls back into the same return. Nothing but edx/r8d/r9d is touched,
-    all three dead there, and the stack frame is the walk's own."""
-    ps = next(s for s in asi.pe.sections if s.Name.startswith(b".pstext"))
-    pv = ps.VirtualAddress
-    pb = bytes(asi.img[ps.PointerToRawData:ps.PointerToRawData + ps.SizeOfRawData])
-    free = (pv + len(pb.rstrip(b"\x00")) + 15) & ~15
+    Both read the same struct. The patcher wants `[mgr+0x58]` (entry array),
+    `[mgr+8]` (count) and `word [entry+0x48]` (base capacity, which it rewrites
+    from 10 to 1000); the walk wants those plus `[mgr+0x68]/[mgr+0x6C]/
+    [mgr+0x78]` for the buckets. One moved offset explains both, and this build
+    says which:
+
+      * each `jcc <shared message>` keeps its opcode and length -- only its
+        rel32 moves, to a stub that sets a stage number (code order, 1..12) and
+        joins a tail that keeps AX's verbose check and prints stage, key and
+        eax. The key and eax are meaningful from stage 6 on; before
+        PRIV_KEY_SET the key slot is uninitialised, so stages 1-5 print
+        whatever is on the stack.
+      * the two stages where rax still holds the manager dump it on the way
+        out, and so does the slot patcher's call site, which is wrapped so the
+        dump runs before the patcher and its return value is logged (once per
+        distinct value -- the worker thread calls it every second).
+
+    The dump walks `mgr+0x00..0xF8` as qwords and, for any that `rdbl` says
+    points at readable memory whose own first qword is also readable, prints
+    sixteen qwords from there. That is one indirection past the manager, so a
+    field holding the entry array shows the first entry's header, where a `10`
+    is the capacity word the patcher is looking for.
+
+    It lives in the 1984 bytes of zero padding between AX's string pool (ends
+    at 0x4683F) and its next block (0x47000) -- unreferenced: no branch and no
+    absolute pointer in the image lands there, and the section is RX, so
+    nothing can have been using it as a buffer."""
+    free = PRIV_GAP
+    gap = bytes(asi.img[asi.off(PRIV_GAP):asi.off(PRIV_GAP_END)])
+    if any(gap):
+        fail(f"the .pstext padding at {PRIV_GAP:#x} is not empty")
+    if not hasattr(asi, "rdbl"):
+        fail("apply_priv_diag needs the AZ block's rdbl helper (--housing)")
 
     e = Emit(free)
-    fmt = e.here()
-    e.raw(b"  [PRIV] no entry: stage %u key %u ax %u\x00")
-    e.align(4, b"\x00")
+    fmt = {}
+    for name, txt in (
+            ("stage", b"  [PRIV] no entry: stage %u key %u ax %u"),
+            ("mgr", b"  [DBG] mgr+%02X = %016llX"),
+            ("deref", b"  [DBG]   mgr+%02X deref +%02X = %016llX"),
+            ("slots", b"  [DBG] slot patcher -> %d")):
+        fmt[name] = e.here()
+        e.raw(txt + b"\x00")
+        e.align(4, b"\x00")
+    e.align(16)
+
+    # One ten-byte stub per refusal (thirteen for the two that can dump).
     stubs = {}
-    for _, _, stage in PRIV_FAIL_SITES:
+    for _, _, stage, dump in PRIV_FAIL_SITES:
         stubs[stage] = e.here()
-        e.h("BA" + struct.pack("<I", stage).hex())   # mov edx,stage
+        if dump:
+            e.h("48 89 C1")                      # mov rcx,rax  (the manager)
+            e.j("E8", "dump")
+        e.h("BA" + struct.pack("<I", stage).hex())
         e.j("E9", "tail")
     e.label("tail")
-    e.h("80 7C 24 60 00")                           # cmp byte [rsp+0x60],0
-    e.rip("0F 84", PRIV_DONE)                       # je done  (quiet build)
-    e.h("44 8B 44 24 48")                           # mov r8d,[rsp+0x48]  (the key)
-    e.h("41 89 C1")                                 # mov r9d,eax
-    e.rip("48 8D 0D", fmt)
+    e.h("80 7C 24 60 00")                        # cmp byte [rsp+0x60],0
+    e.rip("0F 84", PRIV_DONE)                    # quiet call: say nothing
+    e.h("44 8B 44 24 48")                        # mov r8d,[rsp+0x48]  (the key)
+    e.h("41 89 C1")                              # mov r9d,eax
+    e.rip("48 8D 0D", fmt["stage"])
     e.rip("E8", LOGGER)
     e.rip("E9", PRIV_DONE)
 
-    code = e.finish()
-    if free + len(code) > PS_RVA + PS_SIZE:
-        fail(f"[PRIV] stage stubs do not fit in .pstext ({len(code)} bytes at {free:#x})")
-    asi.img[asi.off(free):asi.off(free) + len(code)] = code
+    # PW: replaces `call SLOT_PATCHER`. Dumps the manager first, then calls the
+    # patcher and logs what it returned. 0x28 keeps the alignment the patcher
+    # arrives with and covers the shadow space of all three calls.
+    e.align(16)
+    e.label("pw")
+    e.h("48 83 EC 28")
+    e.rip("48 8B 05", INVMGR_PTR); e.h("48 85 C0"); e.j("0F 84", "pwrun")
+    e.h("48 8B 08"); e.h("48 85 C9"); e.j("0F 84", "pwrun")
+    e.j("E8", "dump")
+    e.label("pwrun")
+    e.rip("E8", SLOT_PATCHER)
+    e.rip("89 05", PS_RET)
+    e.rip("3B 05", PS_LAST); e.j("0F 84", "pwout")
+    e.rip("89 05", PS_LAST)
+    e.h("89 C2")
+    e.rip("48 8D 0D", fmt["slots"]); e.rip("E8", LOGGER)
+    e.label("pwout")
+    e.rip("8B 05", PS_RET)
+    e.h("48 83 C4 28"); e.h("C3")
 
-    for rva, opc, stage in PRIV_FAIL_SITES:
+    # DUMPMGR(rcx = manager), once per session.
+    e.align(16)
+    e.label("dump")
+    e.h("48 83 EC 38")
+    e.rip("83 3D", PS_DMPD, tail=1); e.h("00"); e.j("0F 85", "dmpout")
+    e.rip("C7 05", PS_DMPD, tail=4); e.h("01 00 00 00")
+    e.rip("48 89 0D", PS_MGR)
+    e.rip("C7 05", PS_I, tail=4); e.h("00 00 00 00")
+    e.label("l1")
+    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
+    e.h("4C 8B 04 C8")                           # mov r8,[rax+rcx*8]
+    e.h("89 CA"); e.h("C1 E2 03")                # edx = index*8
+    e.rip("48 8D 0D", fmt["mgr"]); e.rip("E8", LOGGER)
+    # ... and one indirection past it, if both levels are readable
+    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
+    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_P)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.rip("48 8B 05", PS_P); e.h("48 8B 08"); e.rip("48 89 0D", PS_P)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
+    e.label("l2")
+    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_K)
+    e.h("4C 8B 0C C8")                           # mov r9,[rax+rcx*8]
+    e.h("41 89 C8"); e.h("41 C1 E0 03")          # r8d = inner*8
+    e.rip("8B 15", PS_I); e.h("C1 E2 03")        # edx  = outer*8
+    e.rip("48 8D 0D", fmt["deref"]); e.rip("E8", LOGGER)
+    e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
+    e.h("83 F8 10"); e.j("0F 82", "l2")
+    e.label("next")
+    e.rip("8B 05", PS_I); e.h("FF C0"); e.rip("89 05", PS_I)
+    e.h("83 F8 20"); e.j("0F 82", "l1")
+    e.label("dmpout")
+    e.h("48 83 C4 38"); e.h("C3")
+
+    code = e.finish()
+    if free + len(code) > PRIV_GAP_END:
+        fail(f"[PRIV] diagnostics overrun the padding ({len(code)} bytes at {free:#x})")
+    asi.img[asi.off(free):asi.off(free) + len(code)] = code
+    struct.pack_into("<I", asi.img, asi.off(PS_LAST), PS_LAST_INIT)
+
+    for rva, opc, stage, _ in PRIV_FAIL_SITES:
         asi.expect(rva, opc + struct.pack("<i", PRIV_FAIL_MSG - (rva + 6)).hex())
         at = asi.off(rva) + 2
         asi.img[at:at + 4] = struct.pack("<i", stubs[stage] - (rva + 6))
-    note(f"[PRIV] stage stubs           rva {free:#x}: {len(code)} bytes; "
-         f"{len(PRIV_FAIL_SITES)} refusals now distinguishable "
-         f"({PS_RVA + PS_SIZE - free - len(code)} bytes of .pstext left)")
+    asi.expect(SLOT_CALL, "e8" + struct.pack("<i", SLOT_PATCHER - (SLOT_CALL + 5)).hex())
+    at = asi.off(SLOT_CALL) + 1
+    asi.img[at:at + 4] = struct.pack("<i", free + e.lbl["pw"] - (SLOT_CALL + 5))
+    note(f"[PRIV] diagnostics           rva {free:#x}: {len(code)} bytes in the padding; "
+         f"{len(PRIV_FAIL_SITES)} refusals numbered, manager dumped once, "
+         f"slot patcher's result logged ({PRIV_GAP_END - free - len(code)} bytes of padding left)")
 
 
 def apply_canshow(asi):
@@ -1044,7 +1159,8 @@ def apply_housing(asi, pb, pv, slot_call, inv_vt, win_lo, win_hi):
         fail("AZ block target area is not empty")
     asi.img[o:o + len(code)] = code
     boot, scan = free + e.lbl["boot"], free + e.lbl["scan"]
-    note(f"AZ block                     rva {free:#x}: {len(code)} bytes (boot={boot:#x} scan={scan:#x} rdbl={free + e.lbl['rdbl']:#x})")
+    asi.rdbl = free + e.lbl["rdbl"]      # apply_priv_diag's dump guards its derefs with it
+    note(f"AZ block                     rva {free:#x}: {len(code)} bytes (boot={boot:#x} scan={scan:#x} rdbl={asi.rdbl:#x})")
 
     o = asi.off(INV_SCAN_ENTRY)
     j = b"\xE9" + struct.pack("<i", boot - (INV_SCAN_ENTRY + 5))
