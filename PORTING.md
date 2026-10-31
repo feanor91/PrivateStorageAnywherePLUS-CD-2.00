@@ -36,6 +36,8 @@ ces cas :
 | `HOOK CanShow: ABORT` ou `prolog boundary not detected` | le prologue de CanShow n'offre plus 14 octets propres. Le hook passe par la vtable : si cette ligne apparaît, c'est que le hook vtable a renoncé — lire la ligne `CanShow:` juste au-dessus |
 | `CanShow: slot unknown` | la case de vtable n'a pas été enregistrée : le résolveur n'est plus passé par `0x9965`, ou la forme de son chemin a changé |
 | `CanShow: slot base+0x… now holds 0x…` | quelqu'un d'autre a écrit dans la case entre sa lecture et le hook (autre mod, protection) |
+| `InventoryInfo slot patch: N entries` avec un N inattendu | normal : N = le nombre d'inventaires que le jeu livre à 10 places. 5 jusqu'à 2976, **8 depuis 3460** (entrepôts Spagnola, Xamaca, Dragnar ajoutés). Ce n'est un symptôme que si N vaut 0 ou tombe sous le nombre de panneaux liés |
+| `[PRIV] base=… exp=N` avec N ≠ `PrivateStorageExpansions` de l'INI | pas une panne : le total affiché reste bon parce que l'écriture conteneur écrête à `PrivateStorageSlots`. Mettre l'INI à N remet la base à la valeur du jeu et supprime l'écrêtage (voir `PORT-3460.md`) |
 | l'ATH disparaît mais aucun coffre ne s'ouvre ; le log s'arrête après `Warehouse opened`, sans `AUTO-CAPTURED` | CanShow n'est pas accroché : le jeu refuse d'ouvrir un entrepôt loin de son coffre |
 
 **Toujours copier le log avant de relancer le jeu** : il est écrasé au lancement.
@@ -205,7 +207,7 @@ C'est l'intérêt de numéroter : la réponse est arrivée en un seul essai.
 | Hypothèse | Où | Validation par BA |
 |---|---|---|
 | InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` — ✅ **toujours juste sur 3460** (l'étape 7 n'a pas déclenché : la clé 8 est bien dans le bucket) |
-| entrée InventoryInfo : base et max | wrapper AX, patcheur housing | `base=240 max=1000`, et `5 entries` — ❌ **a bougé sur 3460** : `+0x48/+0x4A` → **`+0x10/+0x14`** (plus adjacents). C'est `ENTRY_BASE`/`ENTRY_MAX` dans le script, appliqué à 7 sites. Se redérive avec `--dump-mgr` |
+| entrée InventoryInfo : base et max | wrapper AX, patcheur housing | `base=240 max=1000`, et `5 entries` — ❌ **a bougé sur 3460** : `+0x48/+0x4A` → **`+0x10/+0x14`** (plus adjacents). C'est `ENTRY_BASE`/`ENTRY_MAX` dans le script, appliqué à 7 sites. Se redérive avec `--dump-mgr`. ✅ corrigé, confirmé en jeu sur 3460 |
 | gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée — ✅ **toujours juste sur 3460** (étapes 3-4 et 9-10 passées ; le compte est passé de 18 à 24) |
 | conteneur : `word +0x10` index, `+0x14` total, `+0x16`, `+0x1A` extensions | wrapper AX | `tot` = capacité affichée |
 | propriétaire : `+0x18` tableau, `+0x20` compte ; `[[acteur+0x68]+0xB8]` | wrapper AX | `owner=…`, `n=18` |
@@ -317,10 +319,16 @@ destructeur : le parcours n'écrit qu'après que les étapes 11 et 12 ont accept
 la valeur comme une capacité entre 1 et 2000, et le patcheur n'écrit que là où
 il a lu exactement 10.
 
-À surveiller : le patcheur trouve maintenant **huit** inventaires à 10 et non
-cinq (le jeu a ajouté les entrepôts Spagnola, Xamaca et Dragnar), et le code
-propriétaire/conteneur situé après l'étape 12 n'a encore jamais tourné sur
-3460.
+**Confirmé en jeu le 31 octobre 2026** : `slot patcher -> 8`,
+`InventoryInfo slot patch: 8 entries default 10 -> 1000`, `[PRIV] base=900
+max=1000 exp=760`, `container total 1660 -> 1000`, et plus un seul
+`[PRIV] no entry` sur six ouvertures. Le code propriétaire/conteneur situé
+après l'étape 12, qui n'avait jamais tourné sur 3460, passe sans retouche. Le
+patcheur agrandit bien **huit** inventaires et non cinq : le jeu a ajouté les
+entrepôts Spagnola, Xamaca et Dragnar, qui ont aussi dix places, et la règle
+« tout inventaire à exactement 10 passe à 1000 » les attrape. Laissé tel quel :
+c'est cette règle qui fait survivre le patch à un changement de version, là où
+une liste blanche de clés serait à redériver à chaque fois.
 
 Deux choses apprises en cherchant la clé statiquement, pour ne pas les
 refaire : le pool de noms `InventoryInfoKey` est à `game+0x5C64760` (22 noms,
