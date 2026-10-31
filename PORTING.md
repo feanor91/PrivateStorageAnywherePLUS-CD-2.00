@@ -197,15 +197,16 @@ Constaté et corrigé le 2026-09-15.
 Ces valeurs viennent de 2.00 et sont vérifiées indirectement par l'exécution à
 blanc. Si BA donne des résultats incohérents, c'est ici qu'il faut regarder.
 
-⚠️ Sur 3460, **l'une des trois premières lignes de ce tableau est fausse** :
-le parcours finit en `[PRIV] no entry`. Les numéros d'étape ajoutés au message
-(§6 quater) disent laquelle.
+✅ Sur 3460, les numéros d'étape (§6 quater) ont tranché : **une seule ligne de
+ce tableau est fausse**, celle de l'entrée InventoryInfo. Tout le reste de la
+chaîne — y compris `CAMP_KEY = 8`, que je croyais coupable — tient encore.
+C'est l'intérêt de numéroter : la réponse est arrivée en un seul essai.
 
 | Hypothèse | Où | Validation par BA |
 |---|---|---|
-| InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` — **suspect sur 3460 (étapes 1-2)** |
-| entrée InventoryInfo : `word +0x48` base, `word +0x4A` max | wrapper AX, patcheur housing | idem, et `5 entries` — **suspect sur 3460 (étapes 6-7)** |
-| gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée — **suspect sur 3460 (étapes 3-5)** |
+| InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` — ✅ **toujours juste sur 3460** (l'étape 7 n'a pas déclenché : la clé 8 est bien dans le bucket) |
+| entrée InventoryInfo : `word +0x48` base, `word +0x4A` max | wrapper AX, patcheur housing | idem, et `5 entries` — ❌ **FAUSSE sur 3460** : `word +0x48` vaut 6144 (étape 12), et c'est aussi pourquoi le patcheur de coffres renvoie 0 |
+| gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée — ✅ **toujours juste sur 3460** (étapes 3-4 et 9-10 passées ; le compte est passé de 18 à 24) |
 | conteneur : `word +0x10` index, `+0x14` total, `+0x16`, `+0x1A` extensions | wrapper AX | `tot` = capacité affichée |
 | propriétaire : `+0x18` tableau, `+0x20` compte ; `[[acteur+0x68]+0xB8]` | wrapper AX | `owner=…`, `n=18` |
 | `ResolveActor(holder,&out)` : `out+0x08` acteur, `byte out+0x10` valide | wrapper AX | `owner` non nul |

@@ -149,6 +149,8 @@ PS_MGR = PD_RVA + 96         # qword: the manager, while the dump walks it
 PS_I = PD_RVA + 104          # dword: outer index
 PS_P = PD_RVA + 112          # qword: the pointer the inner loop is reading
 PS_K = PD_RVA + 120          # dword: inner index
+PS_J = PD_RVA + 136          # dword: entry index
+PS_E = PD_RVA + 144          # qword: the entry the dump is reading
 PS_RET = PD_RVA + 128        # dword: the slot patcher's return value
 PS_LAST = PD_RVA + 132       # dword: ... as last logged; preset to a value it cannot return
 PS_LAST_INIT = 0x7FFFFFFF
@@ -809,7 +811,8 @@ def apply_priv_diag(asi):
     for name, txt in (
             ("stage", b"  [PRIV] no entry: stage %u key %u ax %u"),
             ("mgr", b"  [DBG] mgr+%02X = %016llX"),
-            ("deref", b"  [DBG]   mgr+%02X deref +%02X = %016llX"),
+            ("ent", b"  [DBG] entry[%u] = %016llX"),
+            ("word", b"  [DBG]   entry[%u] +%02X = %016llX"),
             ("slots", b"  [DBG] slot patcher -> %d")):
         fmt[name] = e.here()
         e.raw(txt + b"\x00")
@@ -862,29 +865,43 @@ def apply_priv_diag(asi):
     e.rip("C7 05", PS_DMPD, tail=4); e.h("01 00 00 00")
     e.rip("48 89 0D", PS_MGR)
     e.rip("C7 05", PS_I, tail=4); e.h("00 00 00 00")
+    # the manager's own first 32 qwords, flat
     e.label("l1")
     e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
     e.h("4C 8B 04 C8")                           # mov r8,[rax+rcx*8]
     e.h("89 CA"); e.h("C1 E2 03")                # edx = index*8
     e.rip("48 8D 0D", fmt["mgr"]); e.rip("E8", LOGGER)
-    # ... and one indirection past it, if both levels are readable
-    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
-    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_P)
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
-    e.rip("48 8B 05", PS_P); e.h("48 8B 08"); e.rip("48 89 0D", PS_P)
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
-    e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
-    e.label("l2")
-    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_K)
-    e.h("4C 8B 0C C8")                           # mov r9,[rax+rcx*8]
-    e.h("41 89 C8"); e.h("41 C1 E0 03")          # r8d = inner*8
-    e.rip("8B 15", PS_I); e.h("C1 E2 03")        # edx  = outer*8
-    e.rip("48 8D 0D", fmt["deref"]); e.rip("E8", LOGGER)
-    e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
-    e.h("83 F8 10"); e.j("0F 82", "l2")
-    e.label("next")
     e.rip("8B 05", PS_I); e.h("FF C0"); e.rip("89 05", PS_I)
     e.h("83 F8 20"); e.j("0F 82", "l1")
+    # then the entry array the walk and the patcher both index, two levels
+    # down: [[mgr+0x58] + j*8] + k*8. Stage 12 says the array and the entry
+    # pointer are sound and only the capacity word inside the entry is not, so
+    # this is the one dump that locates it -- the five housing chests read 10
+    # at whatever offset it has moved to, and the private warehouse 240.
+    e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 58")
+    e.rip("48 89 0D", PS_P)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
+    e.rip("C7 05", PS_J, tail=4); e.h("00 00 00 00")
+    e.label("l2")
+    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_J)
+    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_E)
+    e.h("49 89 C8")                              # mov r8,rcx  (the entry)
+    e.rip("8B 15", PS_J)
+    e.rip("48 8D 0D", fmt["ent"]); e.rip("E8", LOGGER)
+    e.rip("48 8B 0D", PS_E)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
+    e.label("l3")
+    e.rip("48 8B 05", PS_E); e.rip("8B 0D", PS_K)
+    e.h("4C 8B 0C C8")                           # mov r9,[rax+rcx*8]
+    e.h("41 89 C8"); e.h("41 C1 E0 03")          # r8d = k*8
+    e.rip("8B 15", PS_J)
+    e.rip("48 8D 0D", fmt["word"]); e.rip("E8", LOGGER)
+    e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
+    e.h("83 F8 0E"); e.j("0F 82", "l3")          # 0x70 bytes per entry
+    e.label("next")
+    e.rip("8B 05", PS_J); e.h("FF C0"); e.rip("89 05", PS_J)
+    e.h("83 F8 18"); e.j("0F 82", "l2")          # dword [mgr+8] reads 24
     e.label("dmpout")
     e.h("48 83 C4 38"); e.h("C3")
 
