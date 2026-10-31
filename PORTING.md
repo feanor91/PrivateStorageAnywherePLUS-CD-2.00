@@ -30,7 +30,9 @@ ces cas :
 | crash au lancement ou à l'ouverture | une adresse jeu figée dans l'ASI est obsolète |
 | `[INV] InventoryInfoManager NOT found` | la zone des globals de gestionnaires a bougé |
 | `[PRIV] no entry` / `[PRIV] no container` | clé CampWareHouse ou offsets conteneur changés |
-| `HOOK CanShow: ABORT` ou `prolog boundary not detected` | le prologue de CanShow n'offre plus 14 octets propres ; le hook passe désormais par la vtable, donc ceci ne doit plus arriver |
+| `HOOK CanShow: ABORT` ou `prolog boundary not detected` | le prologue de CanShow n'offre plus 14 octets propres. Le hook passe par la vtable : si cette ligne apparaît, c'est que le hook vtable a renoncé — lire la ligne `CanShow:` juste au-dessus |
+| `CanShow: slot unknown` | la case de vtable n'a pas été enregistrée : le résolveur n'est plus passé par `0x9965`, ou la forme de son chemin a changé |
+| `CanShow: slot base+0x… now holds 0x…` | quelqu'un d'autre a écrit dans la case entre sa lecture et le hook (autre mod, protection) |
 | l'ATH disparaît mais aucun coffre ne s'ouvre ; le log s'arrête après `Warehouse opened`, sans `AUTO-CAPTURED` | CanShow n'est pas accroché : le jeu refuse d'ouvrir un entrepôt loin de son coffre |
 
 **Toujours copier le log avant de relancer le jeu** : il est écrasé au lancement.
@@ -247,6 +249,26 @@ marche : la ligne `AUTO-CAPTURED warehouse controller` manque, et le second
 `Warehouse opened (… sub=0x05)` n'arrive jamais. Le sous-mode reste celui du
 jeu normal — autrement dit le jeu n'est jamais entré dans l'écran d'entrepôt.
 
+## 6 quater. Retour d'expérience 3460 (31 octobre 2026)
+
+Mise à jour du jeu le lendemain de 3446, et premier essai réel du hook
+vtable : `PORT-3460.md`.
+
+| Symptôme | Cause | Correction |
+|---|---|---|
+| `CanShow: slot unknown`, puis `ABORT` | le garde-fou exigeait que la case de vtable contienne l'adresse annoncée par le résolveur. Elle contient un **tremplin** de 5 octets (`e9 … jmp CanShow`), que le résolveur suit avant d'annoncer la destination finale : la comparaison ne pouvait que échouer | enregistrer aussi le **contenu brut** de la case (`.psdata+80`), comparer la case à ça, et donner cette même valeur au détour comme « original » |
+
+Leçon : **une case de vtable ne contient pas forcément la fonction.** Un
+binaire lié en incrémental y met souvent un tremplin `jmp rel32`. Appeler le
+tremplin ou appeler la fonction revient au même, donc la bonne question n'est
+pas « est-ce bien CanShow ? » mais « est-ce toujours ce que j'y ai lu ? ».
+C'est ce que le garde-fou vérifie maintenant, et le message d'échec imprime la
+case et son contenu au lieu d'un simple « unknown ».
+
+Rien d'autre n'a changé de forme entre 3446 et 3460 : toutes les dérivations
+sont passées, seules les adresses ont bougé. Les trois sites `expect` des
+éditions CanShow correspondaient octet pour octet.
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
@@ -265,7 +287,10 @@ Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
   l'ASI et le jeu sont trop éloignés pour un `jmp rel32`, donc tout hook inline
   coûte 14 octets (`jmp [rip+0]` + adresse). Une case de vtable n'en coûte
   aucun : `VirtualProtect` sur 8 octets, on y écrit le détour, et on aiguille
-  le pointeur « original » du détour sur la fonction réelle.
+  le pointeur « original » du détour sur **ce que la case contenait**, sans
+  chercher à savoir ce que c'est : une case de vtable contient souvent un
+  tremplin `jmp rel32` vers la fonction, et l'appeler revient au même. Ne
+  jamais comparer une case à une adresse dérivée autrement.
 - **Greffer du code** dans la queue libre de `.pstext` (section 0x2000 du mod,
   marge restante affichée par le build) avec données dans `.psdata` ; voler
   une instruction existante en `jmp rel32` + `nop` et la rejouer dans le stub

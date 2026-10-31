@@ -116,6 +116,7 @@ VT_STORE = 0x9965            # `mov [VT_PTR],rdi` on the resolver's hit path
 VT_STORE_CONT = 0x996C       # ... and the instruction after it
 IAT_VIRTUALPROTECT = 0x280C8
 PS_CANSLOT = PD_RVA + 72     # qword: address of the slot CanShow was read from
+PS_CANORIG = PD_RVA + 80     # qword: what that slot held -- CanShow, or a thunk to it
 
 
 def fail(msg):
@@ -743,27 +744,42 @@ def apply_canshow(asi):
     is ordinary writable-on-demand data: point it at the detour and the game
     arrives there by itself, with CanShow's code untouched. The detour reaches
     the original through one pointer (CANSHOW_ORIG_PTR, which the prologue
-    installer fills with its trampoline); aiming that at CanShow directly
-    gives the detour exactly what it expects.
+    installer fills with its trampoline); giving it the value the slot already
+    held is exactly what it expects.
 
-    Two edits: the resolver records which slot it read (the address is live in
-    rsi there but was never kept), and the installer call becomes a call to
-    the stub below. If the slot is unknown the stub tail-calls AX's installer,
-    so a build whose prologue is hookable still gets the old route."""
+    That value is not always CanShow. On 3460 the slot holds a five-byte
+    thunk:
+
+        slot -> base+0xEE33D0:  e9 6b 12 2f 09   jmp base+0xA1D4640
+
+    and the resolver follows it, so the address it reports and stores is the
+    far end, not the slot's contents. Checking the slot against *that* can
+    only fail, which is how the first attempt talked itself out of the hook
+    ("slot unknown") and fell back to the prologue it cannot steal. So the
+    resolver records the raw qword as well, and the stub checks the slot
+    against that and hands it to the detour: whether it is CanShow or a thunk
+    to CanShow, calling it does the same thing.
+
+    Two edits: the resolver records the slot and its contents (both live in
+    rsi there, neither kept), and the installer call becomes a call to the
+    stub below. If the slot is unknown, or something else has written to it
+    since, the stub tail-calls AX's installer, so a build whose prologue is
+    hookable still gets the old route."""
     ps = next(s for s in asi.pe.sections if s.Name.startswith(b".pstext"))
     pv = ps.VirtualAddress
     pb = bytes(asi.img[ps.PointerToRawData:ps.PointerToRawData + ps.SizeOfRawData])
     free = (pv + len(pb.rstrip(b"\x00")) + 15) & ~15
     pd = next(s for s in asi.pe.sections if s.Name.startswith(b".psdata"))
     pdb = bytes(asi.img[pd.PointerToRawData:pd.PointerToRawData + pd.SizeOfRawData])
-    if any(pdb[PS_CANSLOT - PD_RVA:PS_CANSLOT - PD_RVA + 8]):
-        fail(".psdata slot for the CanShow vtable hook is not zero in the input")
+    if any(pdb[PS_CANSLOT - PD_RVA:PS_CANORIG - PD_RVA + 8]):
+        fail(".psdata slots for the CanShow vtable hook are not zero in the input")
 
     e = Emit(free)
     strs = {}
     for name, txt in (
             ("ok", b"HOOK CanShow: OK vtable slot base+0x%llX -> detour (orig base+0x%llX)"),
             ("vp", b"HOOK CanShow: ABORT - vtable slot base+0x%llX not writable"),
+            ("chg", b"  CanShow: slot base+0x%llX now holds 0x%llX - prologue hook"),
             ("noslot", b"  CanShow: slot unknown - trying the prologue hook")):
         strs[name] = e.here()
         e.raw(txt + b"\x00")
@@ -771,26 +787,30 @@ def apply_canshow(asi):
     e.align(16)
 
     # SLOT: the resolver's hit path, where rdi = vtable and rsi = the slot the
-    # function pointer came from. Does the store it replaced, keeps rsi, and
-    # rejoins -- no register the continuation reads is touched.
+    # function pointer came from. Does the store it replaced, records the slot
+    # and the qword in it, and rejoins. rax is the only register it touches,
+    # and the continuation neither reads it nor keeps it across its own call.
     slot = e.here()
     e.rip("48 89 3D", VT_PTR)                     # mov [VT_PTR],rdi  (stolen)
     e.rip("48 89 35", PS_CANSLOT)                 # mov [PS_CANSLOT],rsi
+    e.h("48 8B 06")                               # mov rax,[rsi]
+    e.rip("48 89 05", PS_CANORIG)                 # mov [PS_CANORIG],rax
     e.rip("E9", VT_STORE_CONT)
 
     # HOOK(rcx = CanShow) -> al. Frame 0x38 keeps the call alignment the
-    # entry arrives with: +0x20 old protection, +0x28 slot, +0x30 original.
+    # entry arrives with: +0x20 old protection, +0x28 slot, +0x30 CanShow.
     e.align(16)
     hook = e.here()
     e.h("48 83 EC 38")
-    e.h("48 89 4C 24 30")
+    e.h("48 89 4C 24 30")                         # CanShow: only the fallback wants it
     e.rip("48 8B 05", PS_CANSLOT); e.h("48 85 C0"); e.j("0F 84", "inline")
-    e.h("48 39 08"); e.j("0F 85", "inline")       # slot still holds CanShow?
+    e.rip("48 8B 15", PS_CANORIG); e.h("48 85 D2"); e.j("0F 84", "inline")
+    e.h("48 39 10"); e.j("0F 85", "changed")      # slot untouched since?
     e.h("48 89 44 24 28")
     e.h("48 89 C1"); e.h("BA 08 00 00 00"); e.h("41 B8 04 00 00 00")
     e.h("4C 8D 4C 24 20"); e.rip("FF 15", IAT_VIRTUALPROTECT)
     e.h("85 C0"); e.j("0F 84", "vpfail")
-    e.h("48 8B 44 24 28"); e.h("48 8B 4C 24 30")
+    e.h("48 8B 44 24 28"); e.rip("48 8B 0D", PS_CANORIG)
     e.rip("48 89 0D", CANSHOW_ORIG_PTR)           # the detour's "original"
     e.rip("48 8D 15", CANSHOW_DETOUR); e.h("48 89 10")
     e.h("48 89 C1"); e.h("BA 08 00 00 00")
@@ -798,15 +818,21 @@ def apply_canshow(asi):
     e.rip("FF 15", IAT_VIRTUALPROTECT)
     e.rip("48 8B 05", GAME_BASE)
     e.rip("48 8B 15", PS_CANSLOT); e.h("48 29 C2")
-    e.h("4C 8B 44 24 30"); e.h("49 29 C0")
+    e.rip("4C 8B 05", PS_CANORIG); e.h("49 29 C0")
     e.rip("48 8D 0D", strs["ok"]); e.rip("E8", LOGGER)
     e.h("B0 01"); e.h("48 83 C4 38"); e.h("C3")
     e.label("vpfail")
     e.rip("48 8B 15", PS_CANSLOT); e.rip("48 2B 15", GAME_BASE)
     e.rip("48 8D 0D", strs["vp"]); e.rip("E8", LOGGER)
     e.h("30 C0"); e.h("48 83 C4 38"); e.h("C3")
+    e.label("changed")
+    e.h("4C 8B 00")                               # mov r8,[rax] -- what is there now
+    e.rip("48 8B 15", PS_CANSLOT); e.rip("48 2B 15", GAME_BASE)
+    e.rip("48 8D 0D", strs["chg"]); e.rip("E8", LOGGER)
+    e.j("E9", "fallback")
     e.label("inline")
     e.rip("48 8D 0D", strs["noslot"]); e.rip("E8", LOGGER)
+    e.label("fallback")
     e.h("48 8B 4C 24 30"); e.h("48 83 C4 38")
     e.rip("E9", CANSHOW_INSTALL)
 
