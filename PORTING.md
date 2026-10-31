@@ -30,6 +30,8 @@ ces cas :
 | crash au lancement ou à l'ouverture | une adresse jeu figée dans l'ASI est obsolète |
 | `[INV] InventoryInfoManager NOT found` | la zone des globals de gestionnaires a bougé |
 | `[PRIV] no entry` / `[PRIV] no container` | clé CampWareHouse ou offsets conteneur changés |
+| `[PRIV] no entry: stage 1` ou `stage 2` | la clé (`CAMP_KEY`, hypothèse figée à 8) n'est pas dans la table du gestionnaire |
+| `[PRIV] no entry: stage 3` à `7` | un offset du gestionnaire ou de l'entrée a bougé ; le numéro dit quelle lecture a cassé (voir `PRIV_FAIL_SITES` dans le script) |
 | `HOOK CanShow: ABORT` ou `prolog boundary not detected` | le prologue de CanShow n'offre plus 14 octets propres. Le hook passe par la vtable : si cette ligne apparaît, c'est que le hook vtable a renoncé — lire la ligne `CanShow:` juste au-dessus |
 | `CanShow: slot unknown` | la case de vtable n'a pas été enregistrée : le résolveur n'est plus passé par `0x9965`, ou la forme de son chemin a changé |
 | `CanShow: slot base+0x… now holds 0x…` | quelqu'un d'autre a écrit dans la case entre sa lecture et le hook (autre mod, protection) |
@@ -194,11 +196,15 @@ Constaté et corrigé le 2026-09-15.
 Ces valeurs viennent de 2.00 et sont vérifiées indirectement par l'exécution à
 blanc. Si BA donne des résultats incohérents, c'est ici qu'il faut regarder.
 
+⚠️ Sur 3460, **l'une des trois premières lignes de ce tableau est fausse** :
+le parcours finit en `[PRIV] no entry`. Les numéros d'étape ajoutés au message
+(§6 quater) disent laquelle.
+
 | Hypothèse | Où | Validation par BA |
 |---|---|---|
-| InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` |
-| entrée InventoryInfo : `word +0x48` base, `word +0x4A` max | wrapper AX, patcheur housing | idem, et `5 entries` |
-| gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée |
+| InventoryKey `CampWareHouse` = 8 | `CAMP_KEY` dans le script (`NameToKey` n'est plus ancré) | `base=240 max=1000` — **suspect sur 3460 (étapes 1-2)** |
+| entrée InventoryInfo : `word +0x48` base, `word +0x4A` max | wrapper AX, patcheur housing | idem, et `5 entries` — **suspect sur 3460 (étapes 6-7)** |
+| gestionnaire : `+0x08` compteur, `+0x58` tableau, `+0x68/+0x6C/+0x78` buckets | wrapper AX | `n=18`, entrée trouvée — **suspect sur 3460 (étapes 3-5)** |
 | conteneur : `word +0x10` index, `+0x14` total, `+0x16`, `+0x1A` extensions | wrapper AX | `tot` = capacité affichée |
 | propriétaire : `+0x18` tableau, `+0x20` compte ; `[[acteur+0x68]+0xB8]` | wrapper AX | `owner=…`, `n=18` |
 | `ResolveActor(holder,&out)` : `out+0x08` acteur, `byte out+0x10` valide | wrapper AX | `owner` non nul |
@@ -269,6 +275,27 @@ Rien d'autre n'a changé de forme entre 3446 et 3460 : toutes les dérivations
 sont passées, seules les adresses ont bougé. Les trois sites `expect` des
 éditions CanShow correspondaient octet pour octet.
 
+**Confirmé en jeu** : le hook vtable fonctionne, les six panneaux s'ouvrent et
+se ferment, chacun lié à son propre inventaire, sur onze cycles. La crainte
+d'un appel direct ou d'une classe dérivée était infondée : une seule case de
+vtable suffit.
+
+**Reste ouvert** : `[PRIV] no entry` à chaque ouverture — la capacité de
+l'entrepôt privé (F4) n'est plus écrite. Les cinq coffres de maison passent
+par le patcher d'emplacements à l'exécution, qui marche ; l'entrepôt privé
+passe par le parcours de table de hachage d'AX, qui refuse. Sept tests
+différents menaient au même message, ce qui ne disait rien. Chaque refus a
+maintenant son propre numéro d'étape (`apply_priv_diag`) : 1-2 = la clé,
+3-7 = un offset.
+
+Deux choses apprises en cherchant la clé statiquement, pour ne pas les
+refaire : le pool de noms `InventoryInfoKey` est à `game+0x5C64760` (22 noms,
+`CampWareHouse` en 4ᵉ position), et chaque nom est référencé deux fois par une
+fonction d'enregistrement vers `game+0x1D99A6`. Mais les immédiats qu'on y
+trouve sont des **longueurs de `std::string`**, pas des clés, aucun tableau de
+pointeurs n'indexe le pool, et ni l'ordre du pool ni celui de
+l'enregistrement ne donne 8. **La clé ne se dérive pas par là.**
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
@@ -294,7 +321,16 @@ Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
 - **Greffer du code** dans la queue libre de `.pstext` (section 0x2000 du mod,
   marge restante affichée par le build) avec données dans `.psdata` ; voler
   une instruction existante en `jmp rel32` + `nop` et la rejouer dans le stub
-  permet de capter un registre vivant que le mod ne conservait pas.
+  permet de capter un registre vivant que le mod ne conservait pas. Quand la
+  queue se remplit : raccourcir les chaînes de log du script récupère quelques
+  dizaines d'octets, et il reste une plage de 1985 octets nuls non référencés
+  à `0x4683F..0x47000` (vérifié : aucun saut, aucun pointeur absolu n'y mène).
+  `.psdata` est RW, pas exécutable : pas de code dedans.
+- **Un message pour N causes ne diagnostique rien.** Quand un garde-fou a
+  plusieurs sorties vers le même log, donner à chacune son numéro coûte dix
+  octets par site (`mov edx,N ; jmp queue`) sans changer l'opcode ni la
+  longueur du `jcc` d'origine : la version suivante dit laquelle a refusé.
+  C'est ce qui a débloqué le hook CanShow, et c'est en place pour `[PRIV]`.
 - **Fusionner les entrées `.pdata` chaînées** : les fonctions du jeu sont
   découpées en plusieurs entrées consécutives.
 - Une grosse section RWX au nom bizarre (`.sbss` sur 2850) est la section

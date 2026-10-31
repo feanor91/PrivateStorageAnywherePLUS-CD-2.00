@@ -89,6 +89,22 @@ SCAN_OK = 0x9BCD             # `lea rcx,"MainCharGlobal: OK ..." ; sub rdx,rdi ;
 SLOT_PATCHER = 0x8720
 OLD_TAG = b"CD 2.00.AX"        # the tag is 10 bytes; ours is "CD <build>.<XY>"
 CAMP_KEY = 8                 # InventoryKey::CampWareHouse (2.00 value; see --f4 in the docstring)
+
+# The private-storage bucket walk in AX's own .pstext wrapper. Seven separate
+# tests all branch to one `[PRIV] no entry` message, so a failure says nothing
+# about which of them refused. apply_priv_diag gives each its own stage number.
+# Each entry is (rva, the jcc's two opcode bytes, stage).
+PRIV_FAIL_SITES = (
+    (0x46230, "0f 84", 1),   # bucket for this key is empty
+    (0x4623b, "0f 83", 2),   # walked the bucket, key not in it
+    (0x46264, "0f 83", 3),   # entry index past [mgr+8]
+    (0x46275, "0f 84", 4),   # entry array [mgr+0x58] null
+    (0x46282, "0f 84", 5),   # entry pointer null
+    (0x46293, "0f 84", 6),   # base capacity word [entry+0x48] is 0
+    (0x4629e, "0f 87", 7),   # ... or over 0x7D0
+)
+PRIV_FAIL_MSG = 0x46683      # the shared message site the seven jump to
+PRIV_DONE = 0x4669A          # ... which falls into this return
 GAME_SIZE = 0x3D358          # qword: game SizeOfImage
 LOGGER = 0x6DE0              # printf-style log sink
 INV_SCAN_ENTRY = 0xA47E      # inventory-manager resolver: scan entry (fall-through only)
@@ -719,6 +735,60 @@ def apply_f4(asi, mode):
             if bytes(asi.img).count(bytes.fromhex(pat)) != 1:
                 fail(f"F4 live: store {pat} not unique")
         note("F4 live: both game-memory stores active (AX behaviour)")
+    apply_priv_diag(asi)
+
+
+def apply_priv_diag(asi):
+    """Give each of the bucket walk's seven refusals its own stage number.
+
+    AX logs one `[PRIV] no entry` for all of them, which on build 3460 is the
+    whole of what the log says about why the private warehouse stays at its
+    game size. The seven tests fail for quite different reasons -- a key that
+    is not in the manager's table (1, 2) versus a struct offset that has moved
+    (3..7) -- and they need different fixes, so the message has to tell them
+    apart.
+
+    Each `jcc <shared message>` keeps its opcode and length; only its rel32 is
+    aimed at a ten-byte stub that sets the stage number and jumps to a common
+    tail. The tail keeps AX's verbose check, prints the stage with the key and
+    eax (the base capacity at stages 6 and 7, uninteresting at the others),
+    and falls back into the same return. Nothing but edx/r8d/r9d is touched,
+    all three dead there, and the stack frame is the walk's own."""
+    ps = next(s for s in asi.pe.sections if s.Name.startswith(b".pstext"))
+    pv = ps.VirtualAddress
+    pb = bytes(asi.img[ps.PointerToRawData:ps.PointerToRawData + ps.SizeOfRawData])
+    free = (pv + len(pb.rstrip(b"\x00")) + 15) & ~15
+
+    e = Emit(free)
+    fmt = e.here()
+    e.raw(b"  [PRIV] no entry: stage %u key %u ax %u\x00")
+    e.align(4, b"\x00")
+    stubs = {}
+    for _, _, stage in PRIV_FAIL_SITES:
+        stubs[stage] = e.here()
+        e.h("BA" + struct.pack("<I", stage).hex())   # mov edx,stage
+        e.j("E9", "tail")
+    e.label("tail")
+    e.h("80 7C 24 60 00")                           # cmp byte [rsp+0x60],0
+    e.rip("0F 84", PRIV_DONE)                       # je done  (quiet build)
+    e.h("44 8B 44 24 48")                           # mov r8d,[rsp+0x48]  (the key)
+    e.h("41 89 C1")                                 # mov r9d,eax
+    e.rip("48 8D 0D", fmt)
+    e.rip("E8", LOGGER)
+    e.rip("E9", PRIV_DONE)
+
+    code = e.finish()
+    if free + len(code) > PS_RVA + PS_SIZE:
+        fail(f"[PRIV] stage stubs do not fit in .pstext ({len(code)} bytes at {free:#x})")
+    asi.img[asi.off(free):asi.off(free) + len(code)] = code
+
+    for rva, opc, stage in PRIV_FAIL_SITES:
+        asi.expect(rva, opc + struct.pack("<i", PRIV_FAIL_MSG - (rva + 6)).hex())
+        at = asi.off(rva) + 2
+        asi.img[at:at + 4] = struct.pack("<i", stubs[stage] - (rva + 6))
+    note(f"[PRIV] stage stubs           rva {free:#x}: {len(code)} bytes; "
+         f"{len(PRIV_FAIL_SITES)} refusals now distinguishable "
+         f"({PS_RVA + PS_SIZE - free - len(code)} bytes of .pstext left)")
 
 
 def apply_canshow(asi):
@@ -777,10 +847,10 @@ def apply_canshow(asi):
     e = Emit(free)
     strs = {}
     for name, txt in (
-            ("ok", b"HOOK CanShow: OK vtable slot base+0x%llX -> detour (orig base+0x%llX)"),
-            ("vp", b"HOOK CanShow: ABORT - vtable slot base+0x%llX not writable"),
-            ("chg", b"  CanShow: slot base+0x%llX now holds 0x%llX - prologue hook"),
-            ("noslot", b"  CanShow: slot unknown - trying the prologue hook")):
+            ("ok", b"HOOK CanShow: OK slot base+0x%llX -> detour (orig +0x%llX)"),
+            ("vp", b"HOOK CanShow: ABORT - slot base+0x%llX not writable"),
+            ("chg", b"  CanShow: slot base+0x%llX holds 0x%llX - prologue"),
+            ("noslot", b"  CanShow: slot unknown - prologue hook")):
         strs[name] = e.here()
         e.raw(txt + b"\x00")
         e.align(4, b"\x00")
