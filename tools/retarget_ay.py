@@ -105,6 +105,18 @@ PS_INVTRIES = PD_RVA + 68    # dword: scan attempts
 INV_MAX_TRIES = 1800         # worker calls the wrapper every 1 s until the first patch
 INV_RTTI = b".?AVInventoryInfoManager@pa@@"
 
+# CanShow: hooked through its vtable slot rather than its prologue (see
+# apply_canshow). Every value is an AX-fixed rva, each checked by `expect`.
+CANSHOW_INSTALL = 0x5FE0     # AX's prologue installer -- now only a fallback
+CANSHOW_DETOUR = 0xC0B0      # the detour that installer aims the hook at
+CANSHOW_ORIG_PTR = 0x40950   # qword the detour calls through ("the original")
+CANSHOW_CALL = 0x7D37        # `mov rcx,[CanShow] ; call CANSHOW_INSTALL`
+VT_PTR = 0x3D4E0             # qword: the resolved warehouse vtable
+VT_STORE = 0x9965            # `mov [VT_PTR],rdi` on the resolver's hit path
+VT_STORE_CONT = 0x996C       # ... and the instruction after it
+IAT_VIRTUALPROTECT = 0x280C8
+PS_CANSLOT = PD_RVA + 72     # qword: address of the slot CanShow was read from
+
 
 def fail(msg):
     raise SystemExit("STOP: " + msg)
@@ -296,6 +308,13 @@ def derive_layout(g: Game):
     if len(store_hits) != 1:
         fail(f"'store' is not unique in the sub-mode table: {store_hits}")
     store = store_hits[0]
+    # The full gameplay HUD sub-mode -- the one that also drives `interaction`
+    # -- is the top of the range the mod treats as "safe to open from". It was
+    # 16 up to 2976 and became 17 on 3446 when an eighteenth entry appeared.
+    play_hits = [n for n, v in subs_t[0][2].items() if "interaction" in v]
+    if len(play_hits) != 1:
+        fail(f"the gameplay sub-mode ('interaction') is not unique: {play_hits}")
+    play = play_hits[0]
     ms = None
     for va in D.callers_of(g.pe, g.base + builder[0]):
         f = g.merged_function(va - g.base)
@@ -345,7 +364,7 @@ def derive_layout(g: Game):
     for name, ok in checks:
         if not ok:
             fail(f"layout invariant failed: {name} ({lay})")
-    return lo, lay, dict(ingame_mode=ingame, store_sub=store)
+    return lo, lay, dict(ingame_mode=ingame, store_sub=store), play
 
 
 def derive_mainchar(g: Game, loads):
@@ -701,6 +720,111 @@ def apply_f4(asi, mode):
         note("F4 live: both game-memory stores active (AX behaviour)")
 
 
+def apply_canshow(asi):
+    """Hook CanShow through its vtable slot instead of its prologue.
+
+    AX overwrites CanShow's first bytes with `jmp [rip+0]` + an 8-byte
+    address, so it needs an instruction boundary at 14 bytes or more. Build
+    3446's CanShow offers ten:
+
+        +0   mov rax,[rcx+8] / mov r9,rcx / test rax,rax
+        +10  je rel8                     <- a relative branch inside the steal
+        +12  movzx r8d,word [rax+0x8a]   <- which the 14-byte cut splits
+
+    Stealing fourteen bytes therefore both truncates an instruction and moves
+    a rel8 whose target then points into nothing: the game crashed the moment
+    CanShow ran, which is immediately. Refusing the hook instead (the guard
+    below) keeps the game alive but costs the panels -- the detour is what
+    lets a warehouse open away from its chest, so without it every hotkey
+    only hid the HUD.
+
+    The prologue is not the only way in. The mod already finds CanShow by
+    reading it out of UIGamePlayControlRootWarehouse2's vtable, and that slot
+    is ordinary writable-on-demand data: point it at the detour and the game
+    arrives there by itself, with CanShow's code untouched. The detour reaches
+    the original through one pointer (CANSHOW_ORIG_PTR, which the prologue
+    installer fills with its trampoline); aiming that at CanShow directly
+    gives the detour exactly what it expects.
+
+    Two edits: the resolver records which slot it read (the address is live in
+    rsi there but was never kept), and the installer call becomes a call to
+    the stub below. If the slot is unknown the stub tail-calls AX's installer,
+    so a build whose prologue is hookable still gets the old route."""
+    ps = next(s for s in asi.pe.sections if s.Name.startswith(b".pstext"))
+    pv = ps.VirtualAddress
+    pb = bytes(asi.img[ps.PointerToRawData:ps.PointerToRawData + ps.SizeOfRawData])
+    free = (pv + len(pb.rstrip(b"\x00")) + 15) & ~15
+    pd = next(s for s in asi.pe.sections if s.Name.startswith(b".psdata"))
+    pdb = bytes(asi.img[pd.PointerToRawData:pd.PointerToRawData + pd.SizeOfRawData])
+    if any(pdb[PS_CANSLOT - PD_RVA:PS_CANSLOT - PD_RVA + 8]):
+        fail(".psdata slot for the CanShow vtable hook is not zero in the input")
+
+    e = Emit(free)
+    strs = {}
+    for name, txt in (
+            ("ok", b"HOOK CanShow: OK vtable slot base+0x%llX -> detour (orig base+0x%llX)"),
+            ("vp", b"HOOK CanShow: ABORT - vtable slot base+0x%llX not writable"),
+            ("noslot", b"  CanShow: slot unknown - trying the prologue hook")):
+        strs[name] = e.here()
+        e.raw(txt + b"\x00")
+        e.align(4, b"\x00")
+    e.align(16)
+
+    # SLOT: the resolver's hit path, where rdi = vtable and rsi = the slot the
+    # function pointer came from. Does the store it replaced, keeps rsi, and
+    # rejoins -- no register the continuation reads is touched.
+    slot = e.here()
+    e.rip("48 89 3D", VT_PTR)                     # mov [VT_PTR],rdi  (stolen)
+    e.rip("48 89 35", PS_CANSLOT)                 # mov [PS_CANSLOT],rsi
+    e.rip("E9", VT_STORE_CONT)
+
+    # HOOK(rcx = CanShow) -> al. Frame 0x38 keeps the call alignment the
+    # entry arrives with: +0x20 old protection, +0x28 slot, +0x30 original.
+    e.align(16)
+    hook = e.here()
+    e.h("48 83 EC 38")
+    e.h("48 89 4C 24 30")
+    e.rip("48 8B 05", PS_CANSLOT); e.h("48 85 C0"); e.j("0F 84", "inline")
+    e.h("48 39 08"); e.j("0F 85", "inline")       # slot still holds CanShow?
+    e.h("48 89 44 24 28")
+    e.h("48 89 C1"); e.h("BA 08 00 00 00"); e.h("41 B8 04 00 00 00")
+    e.h("4C 8D 4C 24 20"); e.rip("FF 15", IAT_VIRTUALPROTECT)
+    e.h("85 C0"); e.j("0F 84", "vpfail")
+    e.h("48 8B 44 24 28"); e.h("48 8B 4C 24 30")
+    e.rip("48 89 0D", CANSHOW_ORIG_PTR)           # the detour's "original"
+    e.rip("48 8D 15", CANSHOW_DETOUR); e.h("48 89 10")
+    e.h("48 89 C1"); e.h("BA 08 00 00 00")
+    e.h("44 8B 44 24 20"); e.h("4C 8D 4C 24 20")
+    e.rip("FF 15", IAT_VIRTUALPROTECT)
+    e.rip("48 8B 05", GAME_BASE)
+    e.rip("48 8B 15", PS_CANSLOT); e.h("48 29 C2")
+    e.h("4C 8B 44 24 30"); e.h("49 29 C0")
+    e.rip("48 8D 0D", strs["ok"]); e.rip("E8", LOGGER)
+    e.h("B0 01"); e.h("48 83 C4 38"); e.h("C3")
+    e.label("vpfail")
+    e.rip("48 8B 15", PS_CANSLOT); e.rip("48 2B 15", GAME_BASE)
+    e.rip("48 8D 0D", strs["vp"]); e.rip("E8", LOGGER)
+    e.h("30 C0"); e.h("48 83 C4 38"); e.h("C3")
+    e.label("inline")
+    e.rip("48 8D 0D", strs["noslot"]); e.rip("E8", LOGGER)
+    e.h("48 8B 4C 24 30"); e.h("48 83 C4 38")
+    e.rip("E9", CANSHOW_INSTALL)
+
+    code = e.finish()
+    if free + len(code) > PS_RVA + PS_SIZE:
+        fail(f"CanShow stub does not fit in .pstext ({len(code)} bytes at {free:#x})")
+    asi.img[asi.off(free):asi.off(free) + len(code)] = code
+
+    asi.expect(VT_STORE, "48 89 3d 74 3b 03 00")
+    asi.img[asi.off(VT_STORE):asi.off(VT_STORE) + 7] = (
+        b"\xE9" + struct.pack("<i", slot - (VT_STORE + 5)) + b"\x90\x90")
+    asi.expect(CANSHOW_CALL, "48 8b 0d 7a 57 03 00 e8 9d e2 ff ff")
+    at = CANSHOW_CALL + 7
+    asi.img[asi.off(at) + 1:asi.off(at) + 5] = struct.pack("<i", hook - (at + 5))
+    note(f"CanShow vtable hook          rva {free:#x}: {len(code)} bytes; "
+         f"resolver records the slot, installer call -> stub")
+
+
 def apply_housing(asi, pb, pv, slot_call, inv_vt, win_lo, win_hi):
     """Build AZ: defer the inventory-manager resolution to a runtime vtable scan."""
     used = len(pb.rstrip(b"\x00"))
@@ -857,7 +981,7 @@ def main():
     print("deriving from", exe)
     g = Game(exe)
     note(f"SizeOfImage {g.size:#x}")
-    ms, layout, modes = derive_layout(g)
+    ms, layout, modes, play_sub = derive_layout(g)
     mode_disp = derive_mode_obj_disp(g, ms)
     note(f"ModeSwitch game+{ms:#x}  mode object at [parent+{mode_disp:#x}]")
     note("layout " + " ".join(f"{k}={v:#x}" for k, v in layout.items())
@@ -903,23 +1027,41 @@ def main():
     asi.img[o:o + (SCAN_END - SCAN_ENTRY)] = bytes(stub) + b"\xCC" * (SCAN_END - SCAN_ENTRY - len(stub))
     note(f"MainCharGlobal scanner       rva {SCAN_ENTRY:#x}: {len(stub)} bytes, direct store of game+{mainchar:#x}")
 
-    # (1b) Refuse the CanShow hook instead of guessing its prologue length.
+    # (1b) CanShow: hook the vtable slot, and never guess a prologue length.
     #
-    # The upstream installer asks FindPrologBoundary for a boundary >= 14 and,
-    # when that fails, logs "falling back to fixed 14 bytes" and hooks anyway.
-    # On build 3446 CanShow begins
-    #     +0  mov rax,[rcx+8] / mov r9,rcx / test rax,rax
-    #     +10 je rel8                       <- relative branch inside the steal
-    #     +12 movzx r8d,word [rax+0x8a]     <- the 14-byte cut splits this
-    # so the fallback both truncates an instruction and relocates a rel8 whose
-    # target then points elsewhere: the game crashes as soon as CanShow runs,
-    # which is immediately. `mov esi,0xE` is five bytes, exactly a jmp rel32,
-    # so the fallback becomes the installer's own ABORT path -- the hook is
-    # simply not installed and the mod carries on without it.
+    # The prologue installer stays in the image as a fallback, but it may no
+    # longer invent a length. It asks FindPrologBoundary for a boundary at 14
+    # bytes or more and, when that fails, logs "falling back to fixed 14
+    # bytes" and hooks anyway -- on 3446 that cut an instruction in half and
+    # relocated a rel8, and the game died the moment CanShow ran.
+    # `mov esi,0xE` is five bytes, exactly a jmp rel32, so the guess becomes
+    # the installer's own ABORT path instead.
     asi.expect(0x601E, "be 0e 00 00 00")
     asi.expect(0x61B3, "8b d6")
     asi.img[asi.off(0x601E):asi.off(0x601E) + 5] = b"\xE9" + struct.pack("<i", 0x61B3 - (0x601E + 5))
     note("CanShow hook guard           rva 0x601e: guessed 14-byte fallback -> ABORT")
+
+    # The hook itself goes through the vtable, which needs no prologue at all.
+    # It stays fatal on failure, as AX had it (7D43 test al,al ; 7D45 je give
+    # up): without this detour a warehouse cannot open away from its chest, so
+    # every hotkey only hides the HUD -- a loud ABORT beats a READY! that
+    # does nothing.
+    apply_canshow(asi)
+
+    # (1c) The safe-state gate accepts the gameplay sub-modes as a range
+    # starting at 15:
+    #     B4DF lea eax,[rcx-0xf] ; B4E2 cmp al,1 ; B4E4 ja <BLOCKED>
+    # i.e. {15, 16} as built for 2.00. Build 3446's eighteenth sub-mode
+    # pushed the full gameplay HUD from 16 to 17, so every open was refused
+    # with `BLOCKED: unsafe state (mode=0x04 sub=0x11)`. The span is derived
+    # from the jump table instead: 1 while `interaction` sat at 16, 2 now.
+    span = play_sub - 0x0F
+    if not 1 <= span <= 4:
+        fail(f"gameplay sub-mode {play_sub:#x} is not within 0x0F..0x13 of the base")
+    asi.expect(0xB4DF, "8d 41 f1 3c 01")
+    asi.img[asi.off(0xB4E3)] = span
+    note(f"safe-state gate              rva 0xb4e3: accepts sub-modes "
+         f"0x0F..{0x0F + span:#04x} (gameplay HUD at {play_sub:#x})")
 
     # (2) game-side immediates baked into .pstext
     asi.replace_unique(b"\x48\x05" + imm32(AX["MODE_SWITCH"]), b"\x48\x05" + imm32(ms), "ModeSwitch (hook target)")

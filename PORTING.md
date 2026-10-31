@@ -30,6 +30,8 @@ ces cas :
 | crash au lancement ou à l'ouverture | une adresse jeu figée dans l'ASI est obsolète |
 | `[INV] InventoryInfoManager NOT found` | la zone des globals de gestionnaires a bougé |
 | `[PRIV] no entry` / `[PRIV] no container` | clé CampWareHouse ou offsets conteneur changés |
+| `HOOK CanShow: ABORT` ou `prolog boundary not detected` | le prologue de CanShow n'offre plus 14 octets propres ; le hook passe désormais par la vtable, donc ceci ne doit plus arriver |
+| l'ATH disparaît mais aucun coffre ne s'ouvre ; le log s'arrête après `Warehouse opened`, sans `AUTO-CAPTURED` | CanShow n'est pas accroché : le jeu refuse d'ouvrir un entrepôt loin de son coffre |
 
 **Toujours copier le log avant de relancer le jeu** : il est écrasé au lancement.
 
@@ -219,6 +221,32 @@ Leçon : quand le log montre `BLOCKED` avec un `sub` plausible (`0x10`) mais un
 `mode` absurde, c'est l'offset du mode qui est faux, pas la route vers l'objet.
 Le `sub=0x10` prouve que l'objet est le bon.
 
+## 6 ter. Retour d'expérience 3446 (30 octobre 2026)
+
+Premier portage où le jeu **plante au lancement** : `PORT-3446.md`. Quatre
+allers-retours, quatre causes distinctes, dans cet ordre.
+
+| Symptôme | Cause | Correction |
+|---|---|---|
+| `STOP: layout invariant failed: dirty == subtypes + 0x23` | la table des sous-modes est passée de 17 à 18 entrées | l'écart `dirty - subtypes` est dérivé (`2n + 1`), et les deux tables sont distinguées par celle qui émet `ingame-global`, plus par leur taille |
+| plantage au lancement | `HOOK CanShow` tombait sur le repli « 14 octets fixes » : coupe une instruction en deux et déplace un `je rel8` | `mov esi,0xE` (5 octets) devient `jmp` vers le chemin ABORT du mod : plus jamais de longueur devinée |
+| plus de `=== READY!`, aucune touche | l'appelant traite un hook CanShow raté comme fatal | corrigé par la vraie solution ci-dessous (le caractère fatal est conservé) |
+| `BLOCKED: unsafe state (mode=0x04 sub=0x11)` | le sous-mode « jeu normal » est passé de 16 à 17 | la borne du garde-fou est dérivée : l'entrée de la table qui émet `interaction` |
+| panneaux silencieux : l'ATH disparaît, rien ne s'ouvre, le log s'arrête après `Warehouse opened` | CanShow n'était pas accroché du tout ; sans ce détour le jeu refuse d'ouvrir un entrepôt loin de son coffre | **accrocher la case de vtable** au lieu du prologue (voir ci-dessous) |
+
+Leçon la plus importante : **le hook CanShow n'est pas optionnel**, et son
+prologue n'a plus besoin de s'y prêter. Le mod retrouve déjà CanShow en lisant
+la vtable de `UIGamePlayControlRootWarehouse2` ; cette case est de la donnée
+ordinaire. On y écrit l'adresse du détour, et on dirige le pointeur « appeler
+l'original » du détour (`0x40950`, que l'installeur de prologue remplissait
+avec son tremplin) directement sur CanShow. Le code du jeu n'est pas touché.
+L'installeur d'origine reste en place comme repli si la case est inconnue.
+
+Signature d'un panneau qui ne monte pas, à comparer au log d'un build qui
+marche : la ligne `AUTO-CAPTURED warehouse controller` manque, et le second
+`Warehouse opened (… sub=0x05)` n'arrive jamais. Le sous-mode reste celui du
+jeu normal — autrement dit le jeu n'est jamais entré dans l'écran d'entrepôt.
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
@@ -233,6 +261,15 @@ Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
   de globals et comparer le vptr de l'objet pointé (c'est ce que fait `INVSCAN`).
 - **Désassembler fonction par fonction via `.pdata`** (capstone) : un balayage
   linéaire depuis un point arbitraire se désynchronise et rate des sites.
+- **Accrocher une vtable plutôt qu'un prologue** quand les octets manquent :
+  l'ASI et le jeu sont trop éloignés pour un `jmp rel32`, donc tout hook inline
+  coûte 14 octets (`jmp [rip+0]` + adresse). Une case de vtable n'en coûte
+  aucun : `VirtualProtect` sur 8 octets, on y écrit le détour, et on aiguille
+  le pointeur « original » du détour sur la fonction réelle.
+- **Greffer du code** dans la queue libre de `.pstext` (section 0x2000 du mod,
+  marge restante affichée par le build) avec données dans `.psdata` ; voler
+  une instruction existante en `jmp rel32` + `nop` et la rejouer dans le stub
+  permet de capter un registre vivant que le mod ne conservait pas.
 - **Fusionner les entrées `.pdata` chaînées** : les fonctions du jeu sont
   découpées en plusieurs entrées consécutives.
 - Une grosse section RWX au nom bizarre (`.sbss` sur 2850) est la section
