@@ -1,5 +1,10 @@
 # Changelog
 
+## Crimson Desert build 3446 (2026-10-31) -- crash on launch fixed
+
+The 30 October update made the game crash at startup with the mod installed. Cause: the upstream CanShow hook falls back to a guessed 14-byte prologue when its boundary scanner fails, and on 3446 that cut splits an instruction and relocates a `je rel8`. The fallback now takes the installer's own ABORT path instead, on every build. Separately, the sub-mode table grew from 17 to 18 entries, moving `dirty`; the layout invariant now derives that gap as `2*n + 1` from the table rather than hardcoding `0x23`. See [PORT-3446.md](PORT-3446.md).
+
+
 ## Housing-chest expansion can be turned off on its own (2026-10-15)
 
 `--no-chest-slots` (script: `-CoffresNormaux`) keeps the whole runtime machinery and the private-storage feature but stops the 10 -> 1000 rewrite of the five Housing_* entries, which differs from the full build by a single instruction. One of those five entries is the game's valuables-collection display; a player reported that it shows the icons of collectibles they do not own, and that it has done so since the mod was installed. This isolates that effect without giving up the rest of the mod.

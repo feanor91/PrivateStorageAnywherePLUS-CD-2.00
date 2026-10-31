@@ -252,7 +252,8 @@ def derive_layout(g: Game):
     # every table by the cmp immediately preceding its own load. (The
     # original read_jump_tables pairs cmps and tables by order, which the
     # chained/merged ranges on 2944 broke.)
-    ingame = store = None
+    ingame = store = n_sub = None
+    tables = []
     ins = g.dis(builder[0], builder[1] - builder[0])
     seen = set()
     for k, i in enumerate(ins):
@@ -278,11 +279,23 @@ def derive_layout(g: Game):
                 if t:
                     labels[n] = t
             note(f"jump table game+{tbl:#x} ({bound} entries): " + " ".join(f"[{n}]={'/'.join(t)}" for n, t in labels.items()))
-            for n, t in labels.items():
-                if "ingame-global" in t and ingame is None:
-                    ingame = n
-                if "store" in t and bound == 0x11:
-                    store = n
+            tables.append((tbl, bound, labels))
+
+    # The mode table is the one that emits `ingame-global`; the sub-mode table
+    # is the other one. Both carry a `store` entry, so size alone cannot tell
+    # them apart -- and the sub-mode count is not fixed: it went 17 -> 18 on
+    # build 3446, which moved `dirty` by two (see the invariant below).
+    modes_t = [t for t in tables if any("ingame-global" in v for v in t[2].values())]
+    subs_t = [t for t in tables if not any("ingame-global" in v for v in t[2].values())]
+    if len(modes_t) != 1 or len(subs_t) != 1:
+        fail("expected one mode table and one sub-mode table, got "
+             + str([(hex(a), b) for a, b, _ in tables]))
+    ingame = next(n for n, v in modes_t[0][2].items() if "ingame-global" in v)
+    n_sub = subs_t[0][1]
+    store_hits = [n for n, v in subs_t[0][2].items() if "store" in v]
+    if len(store_hits) != 1:
+        fail(f"'store' is not unique in the sub-mode table: {store_hits}")
+    store = store_hits[0]
     ms = None
     for va in D.callers_of(g.pe, g.base + builder[0]):
         f = g.merged_function(va - g.base)
@@ -324,7 +337,10 @@ def derive_layout(g: Game):
         ("mode < submode <= mode + 2", mode < submode <= mode + 2),
         ("flags == submode + 8", flags == submode + 8),
         ("subtypes == flags + 7", subtypes == flags + 7),
-        ("dirty == subtypes + 0x23", dirty == subtypes + 0x23),
+        # subtypes[n_sub] is followed by its shadow copy and then `dirty`, so
+        # the gap is 2*n_sub + 1 -- 0x23 while the game had 17 sub-modes,
+        # 0x25 since build 3446 added an eighteenth.
+        (f"dirty == subtypes + 2*{n_sub} + 1", dirty == subtypes + 2 * n_sub + 1),
     )
     for name, ok in checks:
         if not ok:
@@ -886,6 +902,24 @@ def main():
     o = asi.off(SCAN_ENTRY)
     asi.img[o:o + (SCAN_END - SCAN_ENTRY)] = bytes(stub) + b"\xCC" * (SCAN_END - SCAN_ENTRY - len(stub))
     note(f"MainCharGlobal scanner       rva {SCAN_ENTRY:#x}: {len(stub)} bytes, direct store of game+{mainchar:#x}")
+
+    # (1b) Refuse the CanShow hook instead of guessing its prologue length.
+    #
+    # The upstream installer asks FindPrologBoundary for a boundary >= 14 and,
+    # when that fails, logs "falling back to fixed 14 bytes" and hooks anyway.
+    # On build 3446 CanShow begins
+    #     +0  mov rax,[rcx+8] / mov r9,rcx / test rax,rax
+    #     +10 je rel8                       <- relative branch inside the steal
+    #     +12 movzx r8d,word [rax+0x8a]     <- the 14-byte cut splits this
+    # so the fallback both truncates an instruction and relocates a rel8 whose
+    # target then points elsewhere: the game crashes as soon as CanShow runs,
+    # which is immediately. `mov esi,0xE` is five bytes, exactly a jmp rel32,
+    # so the fallback becomes the installer's own ABORT path -- the hook is
+    # simply not installed and the mod carries on without it.
+    asi.expect(0x601E, "be 0e 00 00 00")
+    asi.expect(0x61B3, "8b d6")
+    asi.img[asi.off(0x601E):asi.off(0x601E) + 5] = b"\xE9" + struct.pack("<i", 0x61B3 - (0x601E + 5))
+    note("CanShow hook guard           rva 0x601e: guessed 14-byte fallback -> ABORT")
 
     # (2) game-side immediates baked into .pstext
     asi.replace_unique(b"\x48\x05" + imm32(AX["MODE_SWITCH"]), b"\x48\x05" + imm32(ms), "ModeSwitch (hook target)")
