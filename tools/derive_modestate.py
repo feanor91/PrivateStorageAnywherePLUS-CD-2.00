@@ -47,7 +47,9 @@ def find_tag_pool(pe, data):
     if anchor < 0:
         raise SystemExit("tag pool not found: 'ingame-global' is absent")
     anchor += 1
-    lo, hi = max(0, anchor - 0x40), anchor + 0x180
+    # The pool is reordered between builds (2944 moved "store" 0x70 bytes
+    # before the anchor), so look on both sides of it.
+    lo, hi = max(0, anchor - 0x200), anchor + 0x200
     out = {}
     for tag in TAGS:
         at = data.find(b"\x00" + tag + b"\x00", lo, hi)
