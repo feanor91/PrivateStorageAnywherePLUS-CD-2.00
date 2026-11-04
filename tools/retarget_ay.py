@@ -560,13 +560,30 @@ def derive_inventory_vtable(g: Game):
     return vts[0]
 
 
+def data_section_of(g: Game, rva):
+    """The section of the image holding rva, if that section is not code."""
+    s = next((x for x in g.pe.sections if x.VirtualAddress <= rva
+              < x.VirtualAddress + x.Misc_VirtualSize), None)
+    return None if s is None or s.Characteristics & 0x20000000 else s
+
+
 def derive_manager_window(g: Game):
     """The block of StaticInfoManager pointer globals: every `mov r10,[rip+G]`
     that feeds the bucket idiom `shl r11,8 ; add r11,[r10+0x78]`. The scan
     window is that cluster padded by 64 KB each side, page-aligned, and must
-    lie inside one non-code section of the image."""
+    lie inside one non-code section of the image.
+
+    A candidate is kept only if it could be the qword the idiom goes on to
+    dereference: 8-aligned, and in a data section. On 3527 the look-back swept
+    in a `mov r10,[rip+X]` belonging to one of the game's control-flow
+    obfuscation stubs (`mov r10,[rip+X] ; sub r10,imm ; xchg [rsp],r10 ; ret`
+    -- a computed return address, with no .pdata entry of its own) sitting
+    0x60 bytes before an unrelated bucket site. It is a real instruction, so
+    no instruction-boundary check would have rejected it; but its target is
+    unaligned and lands in .text, which no pointer global's is."""
     bucket = bytes.fromhex("49C1E3084D035A78")
     globs = collections.Counter()
+    dropped = []
     for s in g.code:
         b = g.blob[s.VirtualAddress]
         va = s.VirtualAddress
@@ -578,19 +595,25 @@ def derive_manager_window(g: Game):
             p = i + 1
             w0 = max(0, i - 0x60)
             for m in re.finditer(rb"\x4C\x8B\x15(....)", b[w0:i], re.S):
-                globs[va + w0 + m.start() + 7 + struct.unpack("<i", m.group(1))[0]] += 1
+                at = va + w0 + m.start()
+                tgt = at + 7 + struct.unpack("<i", m.group(1))[0]
+                if tgt % 8 or data_section_of(g, tgt) is None:
+                    dropped.append((at, tgt))
+                    continue
+                globs[tgt] += 1
     if len(globs) < 10:
         fail(f"too few manager globals found ({len(globs)})")
     lo, hi = min(globs), max(globs) + 8
     lo = (lo - 0x10000) & ~0xFFF
     hi = (hi + 0x10000 + 0xFFF) & ~0xFFF
-    sec = next((x for x in g.pe.sections if x.VirtualAddress <= lo
-                and hi <= x.VirtualAddress + x.Misc_VirtualSize), None)
-    if sec is None or sec.Characteristics & 0x20000000:
+    sec = data_section_of(g, lo)
+    if sec is None or hi > sec.VirtualAddress + sec.Misc_VirtualSize:
         fail(f"manager window {lo:#x}..{hi:#x} is not inside one data section")
     if hi - lo > 0x100000:
         fail(f"manager window too large ({hi - lo:#x})")
-    note(f"manager globals: {len(globs)} distinct, {min(globs):#x}..{max(globs):#x}")
+    skipped = ", ".join(f"{t:#x} at {a:#x}" for a, t in dropped[:3])
+    note(f"manager globals: {len(globs)} distinct, {min(globs):#x}..{max(globs):#x}"
+         + (f"; dropped {len(dropped)} non-pointer candidate(s): {skipped}" if dropped else ""))
     return lo, hi
 
 

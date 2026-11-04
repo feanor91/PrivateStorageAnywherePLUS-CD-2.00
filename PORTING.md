@@ -40,6 +40,8 @@ ces cas :
 | `[PRIV] base=… exp=N` avec N ≠ `PrivateStorageExpansions` de l'INI | pas une panne : le total affiché reste bon parce que l'écriture conteneur écrête à `PrivateStorageSlots`. Mettre l'INI à N remet la base à la valeur du jeu et supprime l'écrêtage (voir `PORT-3460.md`) |
 | l'ATH disparaît mais aucun coffre ne s'ouvre ; le log s'arrête après `Warehouse opened`, sans `AUTO-CAPTURED` | CanShow n'est pas accroché : le jeu refuse d'ouvrir un entrepôt loin de son coffre |
 
+| `STOP: manager window … is not inside one data section` (au **build**, pas en jeu) | un `mov r10,[rip+X]` parasite est entré dans la fenêtre de recherche. Sur 3527 c'était un stub d'obfuscation du jeu (adresse de retour calculée) : vraie instruction, cible non alignée et dans `.text`. Le filtre de forme est en place depuis ; si ça revient, lire la ligne `dropped … non-pointer candidate(s)` |
+
 **Toujours copier le log avant de relancer le jeu** : il est écrasé au lancement.
 
 ---
@@ -338,6 +340,46 @@ trouve sont des **longueurs de `std::string`**, pas des clés, aucun tableau de
 pointeurs n'indexe le pool, et ni l'ordre du pool ni celui de
 l'enregistrement ne donne 8. **La clé ne se dérive pas par là.**
 
+## 6 quinquies. Retour d'expérience 3462 / 3479 / 3527 (novembre 2026)
+
+**3462 et 3479 n'ont demandé aucune modification** : `MAJ-mod.bat` relancé, tout
+s'est redérivé seul, et 3479 a été confirmé en jeu (`slot patcher -> 8`,
+`8 entries default 10 -> 1000`, hook CanShow par la case de vtable). C'est la
+première fois que le script encaisse une mise à jour sans intervention — le
+correctif des offsets de 3460 a tenu.
+
+**3527** s'est arrêté sur `STOP: manager window 0x71ae000..0x13812000 is not
+inside one data section`. Un seul candidat parasite, et il tirait la fenêtre de
+0x71c3220 jusqu'à 0x13801xxx.
+
+Le piège mérite d'être retenu, parce qu'aucune vérification « sérieuse »
+habituelle ne l'aurait attrapé. Le candidat est un **vrai** `mov r10,[rip+X]`,
+dans un stub d'obfuscation du jeu :
+
+```
+mov r10,[rip+X] ; sub r10,imm ; xchg [rsp],r10 ; add [rsp],imm ; ret
+```
+
+— une adresse de retour calculée. Donc : contrôle de limite d'instruction
+inutile (c'en est une), désassemblage resynchronisé inutile, et `.pdata` n'a
+même aucune entrée couvrant ce stub, donc rien où s'ancrer. En revanche la
+**cible** se trahit deux fois : `0x1380112b` n'est pas aligné sur 8, et il est
+dans `.text`. Or l'idiome déréférence ensuite cette valeur comme `[r10+0x78]`,
+donc c'est forcément un qword en données.
+
+⚠️ **Leçon de méthode** : quand un balayage ramasse des globals par leur
+voisinage dans le code, ne pas valider le *site* mais la **cible**, avec ce
+que le code en fait ensuite. Ici deux conditions de forme (aligné sur 8, hors
+section de code) suffisent, et elles ne peuvent pas devenir fausses pour un
+vrai global. Le garde-fou `too few manager globals` reste, donc si c'est le
+vrai groupe qui bouge, le build s'arrête toujours. Les candidats écartés sont
+**affichés** (`dropped … non-pointer candidate(s)`) et non silencieux : si le
+jeu se met un jour à ranger ces globals ailleurs, la ligne le dira.
+
+Le reste n'a pas bougé de forme sur les trois builds : table des sous-modes
+toujours 18 entrées avec l'ATH de jeu en 0x11, invariant de layout vérifié,
+paire de capacité toujours en `+0x10/+0x14`. Détails dans `PORT-3527.md`.
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
@@ -350,6 +392,11 @@ Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
   → qword `base+COL` en data → vtable = adresse + 8. L'identité est exacte.
 - **Résoudre à l'exécution** quand la statique est bloquée : scanner une fenêtre
   de globals et comparer le vptr de l'objet pointé (c'est ce que fait `INVSCAN`).
+- **Valider une cible, pas un site** : un balayage qui ramasse des globals par
+  voisinage ramassera tôt ou tard une instruction d'un stub d'obfuscation
+  (vraie instruction, pas d'entrée `.pdata`, cible dans `.text`). Filtrer sur
+  ce que le code fait ensuite de la valeur — alignement et section — et
+  afficher les candidats écartés. Voir §6 quinquies.
 - **Désassembler fonction par fonction via `.pdata`** (capstone) : un balayage
   linéaire depuis un point arbitraire se désynchronise et rate des sites.
 - **Accrocher une vtable plutôt qu'un prologue** quand les octets manquent :
