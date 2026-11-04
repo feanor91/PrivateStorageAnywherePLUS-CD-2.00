@@ -380,6 +380,10 @@ Le reste n'a pas bougé de forme sur les trois builds : table des sous-modes
 toujours 18 entrées avec l'ATH de jeu en 0x11, invariant de layout vérifié,
 paire de capacité toujours en `+0x10/+0x14`. Détails dans `PORT-3527.md`.
 
+**Confirmé en jeu le 4 novembre 2026** : sept ouvertures de panneau, les huit
+coffres agrandis au démarrage, aucun refus (`no entry`, `no container`,
+`ABORT`, `FATAL` : zéro). Journal dans `docs/logs-3527/`.
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
