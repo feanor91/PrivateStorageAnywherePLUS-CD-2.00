@@ -1,7 +1,7 @@
 @echo off
 REM Double-clique sur ce fichier pour installer la version DIAGNOSTIC du mod.
-REM Elle ne modifie rien dans le jeu : elle copie dans son journal ce que le jeu
-REM contient en memoire, pour retrouver comment reparer l agrandissement des coffres.
+REM Elle agrandit les coffres de maison (comme la version normale) et copie dans son journal
+REM ce que le mod voit en memoire, pour verifier que l agrandissement vise les bonnes donnees.
 REM Le jeu doit etre FERME.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0MAJ-mod.ps1" -Diagnostic %*
 echo.

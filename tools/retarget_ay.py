@@ -138,6 +138,7 @@ ENTRY_SITES = (
 SLOT_CALL = 0x4612F          # `call SLOT_PATCHER` in the wrapper, before the walk
 PRIV_GAP = 0x46850           # unreferenced zero padding between AX's data and its next block
 PRIV_GAP_END = 0x47000
+PRIV_GUARD = 0x46FC0         # the chest-signature stub lives in the last 64 bytes of the gap
 GAME_SIZE = 0x3D358          # qword: game SizeOfImage
 LOGGER = 0x6DE0              # printf-style log sink
 INV_SCAN_ENTRY = 0xA47E      # inventory-manager resolver: scan entry (fall-through only)
@@ -174,6 +175,7 @@ PS_K = PD_RVA + 120          # dword: inner index
 PS_J = PD_RVA + 136          # dword: entry index
 PS_E = PD_RVA + 144          # qword: the entry the dump is reading
 PS_N = PD_RVA + 152          # dword: how many entries the manager says it holds (capped)
+PS_SEEN = PD_RVA + 160       # dword: bit j set once info object j has been dumped
 PS_RET = PD_RVA + 128        # dword: the slot patcher's return value
 PS_LAST = PD_RVA + 132       # dword: ... as last logged; preset to a value it cannot return
 PS_LAST_INIT = 0x7FFFFFFF
@@ -890,9 +892,24 @@ MGR_SITES = (
     (0x46226, 3, "48 03 41 78", "buckets"),       # walk: bucket array
     (0x46261, 2, "3b 51 08", "count"),            # walk: index < entry count
     (0x4626E, 3, "48 8b 49 58", "entries"),       # walk: entry-pointer array
-    (0x0874C, 3, "4c 8b 50 58", "entries"),       # slot patcher: entry-pointer array
-    (0x08755, 3, "44 8b 48 08", "count"),         # slot patcher: entry count
+    (0x0874C, 3, "4c 8b 50 58", "table"),         # slot patcher: the info table
+    (0x08755, 3, "44 8b 48 08", "tcount"),        # slot patcher: its element count
 )
+# On 3732 the objects the slot patcher edits are no longer reached through the
+# bucket walk's pointer array (that array now holds 8-byte {id, key, id}
+# records, 8 bytes apart, and the capacity pair is not in them). They sit in a
+# second table the game's own getter reads: `cmp r8d,[M+0x28]` (count), then
+# `[M+0x20] + id*0x18`, then `qword [elem+8]` -- the pointer to the InventoryInfo
+# object, null until the game loads it. 248 callers of that getter read a word
+# at +0x10 and a word at +0x14 from the object it returns, the pair AX edits.
+# These four numbers are measured on 3732, not derived: the build guards them
+# at run time instead (see apply_chest_guard) and logs what the patcher did.
+INFO_TABLE = {"table": 0x20, "tcount": 0x28, "stride": 0x18, "ptr": 0x08}
+PATCHER_ADDR = 0x08775       # `lea eax,[rdx*8] ; mov rax,[rax+r10]`: entry j of a pointer array
+PATCHER_ADDR_AX = "8d 04 d5 00 00 00 00 4a 8b 04 10"
+PATCHER_CMP = 0x08789        # `cmp word [rax+ENTRY_BASE],10 ; jne skip`
+PATCHER_WRITE = 0x08790      # `mov word [rax+ENTRY_BASE],r11w`
+PATCHER_SKIP = 0x0879D
 # what the diagnostic dump reads: the AX values until apply_manager_offsets says otherwise
 MGR = {"count": 0x08, "entries": 0x58}
 
@@ -907,16 +924,73 @@ def apply_manager_offsets(asi, lay):
     if lay["buckets"] == MGR_AX["buckets"]:
         note("manager offsets             unchanged (AX layout)")
         return
+    lay = dict(lay, table=INFO_TABLE["table"], tcount=INFO_TABLE["tcount"])
     for rva, at, want, role in MGR_SITES:
         asi.expect(rva, want)
         v = lay[role]
         if not 0 <= v < 0x80:
             fail(f"manager offset {role} +{v:#x} does not fit a disp8")
         asi.img[asi.off(rva) + at] = v
-    MGR.update(count=lay["count"], entries=lay["entries"])
+    MGR.update(count=lay["tcount"], entries=lay["table"])
     note(f"manager offsets             div +{lay['div']:#x} count +{lay['count']:#x} "
-         f"buckets +{lay['buckets']:#x} entries +{lay['entries']:#x} "
-         f"(AX: +0x68/+0x6C|+8/+0x78/+0x58) at {len(MGR_SITES)} sites")
+         f"buckets +{lay['buckets']:#x} | info table +{lay['table']:#x} count +{lay['tcount']:#x} "
+         f"(AX: +0x68/+0x6C/+0x78 | +0x58 / +0x08) at {len(MGR_SITES)} sites")
+    # the patcher indexes elements of INFO_TABLE["stride"] bytes and follows the
+    # pointer at INFO_TABLE["ptr"]: `lea eax,[rdx+rdx*2] ; mov rax,[r10+rax*8+8]`
+    assert INFO_TABLE["stride"] == 0x18 and INFO_TABLE["ptr"] == 8
+    asi.expect(PATCHER_ADDR, PATCHER_ADDR_AX)
+    at = asi.off(PATCHER_ADDR)
+    asi.img[at:at + 11] = bytes.fromhex("8d 04 52 49 8b 44 c2 08 90 90 90".replace(" ", ""))
+    note(f"slot patcher addressing     rva {PATCHER_ADDR:#x}: pointer array -> "
+         f"{INFO_TABLE['stride']:#x}-byte elements, object pointer at +{INFO_TABLE['ptr']:#x}")
+    apply_chest_guard(asi)
+
+
+def apply_chest_guard(asi):
+    """Only touch an info object that looks like a housing chest.
+
+    AX raises the capacity word of every object whose word at +ENTRY_BASE is 10.
+    That is safe where the layout is known; on a new build it is a write to
+    whatever happens to be 10 at that offset. A chest also carries its ceiling,
+    1000, at +ENTRY_MAX (as on 3460: the eight objects at 10 are the ones with a
+    1000 ceiling; the ones that cannot be extended repeat one value twice). So
+    the write is routed through a stub that requires that second word too, and
+    writes nothing otherwise. A wrong layout then costs the feature, not data.
+
+    Where the check lives matters. The patcher is a __try/__except function: an
+    access violation at one of *its* addresses is caught and logged as `-1`
+    (which is what 3732 showed). The stub is outside that range, so a fault in
+    it would be unhandled and kill the game. The first read, `cmp word
+    [rax+BASE],10`, therefore stays inline; the stub only reads +MAX, which
+    sits in the same page once +BASE has been read, and performs the write
+    AX performed. Replaced: the 5-byte write at PATCHER_WRITE, by a jmp.
+
+        inline:  cmp word [rax+BASE],10 ; jne skip          (unchanged)
+        stub:    cmp word [rax+MAX],1000 ; jne skip
+                 mov  word [rax+BASE],r11w                  (AX's write)
+                 jmp  after-the-write"""
+    S = PRIV_GUARD
+    if any(asi.img[asi.off(S):asi.off(PRIV_GAP_END)]):
+        fail(f"the chest-guard area at {S:#x} is not empty")
+    base_b, max_b = "%02x" % ENTRY_BASE, "%02x" % ENTRY_MAX
+    asi.expect(PATCHER_CMP, "66 83 78 %s 0a 75 0d" % base_b)
+    asi.expect(PATCHER_WRITE, "66 44 89 58 %s 41 ff c0" % base_b)
+
+    def rel(at, tgt):
+        return struct.pack("<i", tgt - (at + 4))
+
+    code = bytearray()
+    code += bytes.fromhex("66 81 78 %s e8 03" % max_b)             # cmp word [rax+MAX],1000
+    code += b"\x0f\x85" + rel(S + len(code) + 2, PATCHER_SKIP)     # jne skip
+    code += bytes.fromhex("66 44 89 58 %s" % base_b)               # mov word [rax+BASE],r11w
+    code += b"\xe9" + rel(S + len(code) + 1, PATCHER_WRITE + 5)    # jmp inc r8d
+    if S + len(code) > PRIV_GAP_END:
+        fail("the chest guard does not fit")
+    asi.img[asi.off(S):asi.off(S) + len(code)] = code
+    at = asi.off(PATCHER_WRITE)
+    asi.img[at:at + 5] = b"\xe9" + rel(PATCHER_WRITE + 1, S)
+    note(f"chest guard                 rva {S:#x}: {len(code)} bytes; the patcher writes only where "
+         f"word +{ENTRY_BASE:#x} == 10 and word +{ENTRY_MAX:#x} == 1000 (first read stays in its __try)")
 
 
 def apply_entry_offsets(asi):
@@ -973,7 +1047,7 @@ def apply_f4(asi, mode):
     apply_priv_diag(asi, "--dump-mgr" in sys.argv)
 
 
-def apply_priv_diag(asi, dump_mgr, walk_open=True):
+def apply_priv_diag(asi, dump_mgr, walk_open=True, dump_only=False):
     """Say which of the twelve refusals fired, and what the manager looks like.
 
     Two things fail on build 3460, and the log says almost nothing about
@@ -1019,7 +1093,7 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
     absolute pointer in the image lands there, and the section is RX, so
     nothing can have been using it as a buffer."""
     free = PRIV_GAP
-    gap = bytes(asi.img[asi.off(PRIV_GAP):asi.off(PRIV_GAP_END)])
+    gap = bytes(asi.img[asi.off(PRIV_GAP):asi.off(PRIV_GUARD)])
     if any(gap):
         fail(f"the .pstext padding at {PRIV_GAP:#x} is not empty")
     if not hasattr(asi, "rdbl"):
@@ -1033,10 +1107,10 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
     if slot_live:
         strings += [("slots", b"  [DBG] slot patcher -> %d")]
     if dump_mgr:
-        strings += [("cnt", b"  [DBG] entry count=%u  entry array=%016llX"),
-                    ("mgr", b"  [DBG] mgr+%02X = %016llX"),
-                    ("ent", b"  [DBG] entry[%u] = %016llX"),
-                    ("word", b"  [DBG]   entry[%u] +%02X = %016llX")]
+        strings += [("cnt", b"  [DBG] info table: count=%u  base=%016llX"),
+                    ("elem", b"  [DBG] elem[%u] +%02X = %016llX"),
+                    ("ent", b"  [DBG] info[%u] = %016llX"),
+                    ("word", b"  [DBG]   info[%u] +%02X = %016llX")]
     fmt = {}
     for name, txt in strings:
         fmt[name] = e.here()
@@ -1066,7 +1140,7 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
     # PW: replaces `call SLOT_PATCHER`. Dumps the manager first, then calls the
     # patcher and logs what it returned. 0x28 keeps the alignment the patcher
     # arrives with and covers the shadow space of all three calls.
-    if not walk_open:
+    if dump_only:
         if not (slot_live and dump_mgr):
             fail("the read-only dump build needs the slot patcher call and --dump-mgr")
         e.align(16)
@@ -1104,7 +1178,7 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
         emit_dump(e, asi, fmt)
 
     code = e.finish()
-    if free + len(code) > PRIV_GAP_END:
+    if free + len(code) > PRIV_GUARD:
         fail(f"[PRIV] diagnostics overrun the padding ({len(code)} bytes at {free:#x})")
     asi.img[asi.off(free):asi.off(free) + len(code)] = code
     struct.pack_into("<I", asi.img, asi.off(PS_LAST), PS_LAST_INIT)
@@ -1119,87 +1193,105 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
         asi.img[at:at + 4] = struct.pack("<i", free + e.lbl["pw"] - (SLOT_CALL + 5))
     note(f"[PRIV] diagnostics           rva {free:#x}: {len(code)} bytes in the padding; "
          + (f"{len(PRIV_FAIL_SITES)} refusals numbered" if walk_open
-            else "READ-ONLY: walk closed, slot patcher replaced by the dump")
+            else "READ-ONLY: walk closed, slot patcher replaced by the dump" if dump_only
+            else "walk closed, slot patcher kept and its result logged")
          + f"{', slot patcher result logged' if slot_live and walk_open else ''}"
          f"{', manager dumped (--dump-mgr)' if dump_mgr else ''} "
-         f"({PRIV_GAP_END - free - len(code)} bytes of padding left)")
+         f"({PRIV_GUARD - free - len(code)} bytes of padding left)")
 
 
 def emit_dump(e, asi, fmt):
-    """The --dump-mgr block: the manager's fields, then every entry it holds.
+    """The --dump-mgr block, for the info table (see INFO_TABLE).
+
+    Called every second from the slot-patcher wrapper, so it is built to be
+    re-entered: the header and the 24 raw elements (`[table + j*0x18]`, three
+    qwords each) are printed once, and each info object (`qword [elem+8]`,
+    null until the game loads it) is printed once, the first time it is
+    non-null and readable -- 32 qwords, 0x100 bytes. Which objects are done is
+    a bit mask in PS_SEEN.
 
     Every read is behind `rdbl` (a VirtualQuery-backed readable-page test), the
-    entry count is read from the manager (MGR["count"], derived) instead of
-    assumed to be 24 (capped at 0x40), and an entry is dumped as thirty-two
-    qwords rather than fourteen --
-    3732 may have changed the entry's size as 3460 changed its fields, and a
-    count or size that is too small is exactly what hid the layout last time.
-    All state lives in .psdata; the registers do not survive the calls."""
+    count comes from the manager and is capped at 0x20, and all state lives in
+    .psdata because the registers do not survive the calls."""
+    T, C = MGR["entries"], MGR["count"]
     e.align(16)
     e.label("dump")
     e.h("48 83 EC 38")
-    e.rip("83 3D", PS_DMPD, tail=1); e.h("00"); e.j("0F 85", "dmpout")
-    e.rip("C7 05", PS_DMPD, tail=4); e.h("01 00 00 00")
     e.rip("48 89 0D", PS_MGR)
-    # the manager's first 0x80 bytes must be readable before anything below
     e.rip("48 8B 0D", PS_MGR); e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
     e.rip("48 8B 0D", PS_MGR); e.h("48 83 C1 7F")            # add rcx,0x7F
     e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
-    # count and array, so the log says what the walk would have been given
-    e.rip("48 8B 05", PS_MGR)
-    e.h("8B 50 %02X" % MGR["count"])                        # mov edx,[rax+count]
-    e.h("4C 8B 40 %02X" % MGR["entries"])                   # mov r8,[rax+entries]
-    e.rip("48 8D 0D", fmt["cnt"]); e.rip("E8", LOGGER)
-    e.rip("48 8B 05", PS_MGR)
-    e.h("8B 40 %02X" % MGR["count"])                        # mov eax,[rax+count]
-    e.h("83 F8 40"); e.j("0F 86", "capok")                  # cmp eax,0x40 ; jbe
-    e.h("B8 40 00 00 00")
+    # N = min(count, 0x20)
+    e.rip("48 8B 05", PS_MGR); e.h("8B 40 %02X" % C)         # mov eax,[rax+count]
+    e.h("83 F8 20"); e.j("0F 86", "capok")                   # cmp eax,0x20 ; jbe
+    e.h("B8 20 00 00 00")
     e.label("capok")
     e.rip("89 05", PS_N)
-    e.rip("C7 05", PS_I, tail=4); e.h("00 00 00 00")
-    # the manager's own first 48 qwords, flat
-    e.label("l1")
-    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
-    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "l1done")
-    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
-    e.h("4C 8B 04 C8")                                      # mov r8,[rax+rcx*8]
-    e.h("89 CA"); e.h("C1 E2 03")                           # edx = index*8
-    e.rip("48 8D 0D", fmt["mgr"]); e.rip("E8", LOGGER)
-    e.rip("8B 05", PS_I); e.h("FF C0"); e.rip("89 05", PS_I)
-    e.h("83 F8 30"); e.j("0F 82", "l1")
-    e.label("l1done")
-    # the entry array [mgr+0x58]: P, then entry j at [P + j*8], then its words
-    e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 %02X" % MGR["entries"])
+    e.h("85 C0"); e.j("0F 84", "dmpout")
+    # the table must be readable
+    e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 %02X" % T)      # mov rcx,[rax+table]
     e.rip("48 89 0D", PS_P)
     e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
+    # header and raw elements, once
+    e.rip("83 3D", PS_DMPD, tail=1); e.h("00"); e.j("0F 85", "scan")
+    e.rip("C7 05", PS_DMPD, tail=4); e.h("01 00 00 00")
+    e.rip("48 8B 05", PS_MGR)
+    e.h("8B 50 %02X" % C)                                    # mov edx,[rax+count]
+    e.h("4C 8B 40 %02X" % T)                                 # mov r8,[rax+table]
+    e.rip("48 8D 0D", fmt["cnt"]); e.rip("E8", LOGGER)
     e.rip("C7 05", PS_J, tail=4); e.h("00 00 00 00")
-    e.label("l2")
-    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_J)
-    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
-    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_J)
-    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_E)              # E = [P + j*8]
-    e.h("49 89 C8")                                         # mov r8,rcx  (the entry)
-    e.rip("8B 15", PS_J)
-    e.rip("48 8D 0D", fmt["ent"]); e.rip("E8", LOGGER)
-    e.rip("48 8B 0D", PS_E)
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.label("l_el")
+    e.rip("8B 05", PS_J); e.h("48 8D 04 40")                 # lea rax,[rax+rax*2]
+    e.rip("48 8B 0D", PS_P); e.h("48 8D 0C C1")              # lea rcx,[rcx+rax*8]
+    e.rip("48 89 0D", PS_E)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next_el")
+    e.rip("48 8B 0D", PS_E); e.h("48 83 C1 17")              # add rcx,0x17
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next_el")
     e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
-    e.label("l3")
+    e.label("l_ek")
     e.rip("48 8B 05", PS_E); e.rip("8B 0D", PS_K)
-    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
-    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.h("4C 8B 0C C8")                                       # mov r9,[rax+rcx*8]
+    e.h("41 89 C8"); e.h("41 C1 E0 03")                      # r8d = k*8
+    e.rip("8B 15", PS_J)
+    e.rip("48 8D 0D", fmt["elem"]); e.rip("E8", LOGGER)
+    e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
+    e.h("83 F8 03"); e.j("0F 82", "l_ek")                    # three qwords per element
+    e.label("next_el")
+    e.rip("8B 05", PS_J); e.h("FF C0"); e.rip("89 05", PS_J)
+    e.rip("3B 05", PS_N); e.j("0F 82", "l_el")
+    # every info object not yet printed
+    e.label("scan")
+    e.rip("C7 05", PS_J, tail=4); e.h("00 00 00 00")
+    e.label("l_in")
+    e.rip("8B 0D", PS_J); e.rip("8B 05", PS_SEEN)
+    e.h("0F A3 C8"); e.j("0F 82", "next_in")                 # bt eax,ecx ; jc: done already
+    e.rip("8B 05", PS_J); e.h("48 8D 04 40")                 # lea rax,[rax+rax*2]
+    e.rip("48 8B 0D", PS_P); e.h("48 8D 0C C1")              # lea rcx,[rcx+rax*8]
+    e.h("48 83 C1 08")                                       # add rcx,8: the pointer field
+    e.rip("48 89 0D", PS_E)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next_in")
+    e.rip("48 8B 05", PS_E); e.h("48 8B 08")                 # mov rcx,[rax]: the object
+    e.h("48 85 C9"); e.j("0F 84", "next_in")                 # not loaded yet
+    e.rip("48 89 0D", PS_E)
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next_in")
+    e.rip("48 8B 0D", PS_E); e.h("48 81 C1 FF 00 00 00")     # add rcx,0xFF
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next_in")
+    e.rip("8B 0D", PS_J); e.rip("8B 05", PS_SEEN)
+    e.h("0F AB C8"); e.rip("89 05", PS_SEEN)                 # bts eax,ecx ; store
+    e.rip("4C 8B 05", PS_E); e.rip("8B 15", PS_J)
+    e.rip("48 8D 0D", fmt["ent"]); e.rip("E8", LOGGER)
+    e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
+    e.label("l_ik")
     e.rip("48 8B 05", PS_E); e.rip("8B 0D", PS_K)
-    e.h("4C 8B 0C C8")                                      # mov r9,[rax+rcx*8]
-    e.h("41 89 C8"); e.h("41 C1 E0 03")                     # r8d = k*8
+    e.h("4C 8B 0C C8")                                       # mov r9,[rax+rcx*8]
+    e.h("41 89 C8"); e.h("41 C1 E0 03")                      # r8d = k*8
     e.rip("8B 15", PS_J)
     e.rip("48 8D 0D", fmt["word"]); e.rip("E8", LOGGER)
     e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
-    e.h("83 F8 20"); e.j("0F 82", "l3")                     # thirty-two qwords per entry
-    e.label("next")
+    e.h("83 F8 20"); e.j("0F 82", "l_ik")                    # thirty-two qwords per object
+    e.label("next_in")
     e.rip("8B 05", PS_J); e.h("FF C0"); e.rip("89 05", PS_J)
-    e.rip("3B 05", PS_N); e.j("0F 82", "l2")                # j < the manager's own count
+    e.rip("3B 05", PS_N); e.j("0F 82", "l_in")
     e.label("dmpout")
     e.h("48 83 C4 38"); e.h("C3")
 
@@ -1478,7 +1570,7 @@ def main():
         if f4 not in ("dry", "live") or not housing:
             raise SystemExit(__doc__)
     args = [a for a in sys.argv[1:]
-            if a not in ("--housing", "--no-chest-slots", "--f4", "dry", "live", "--dump-mgr")]
+            if a not in ("--housing", "--no-chest-slots", "--f4", "dry", "live", "--dump-mgr", "--dump-only")]
     if len(args) != 3:
         raise SystemExit(__doc__)
     src, dst, exe = Path(args[0]), Path(args[1]), Path(args[2])
@@ -1511,6 +1603,13 @@ def main():
         inv_vt = derive_inventory_vtable(g)
         note(f"InventoryInfoManager vtable game+{inv_vt:#x}")
         win_lo, win_hi, mgr_layout = derive_manager_layout(g, mainchar)
+        if f4 is not None and mgr_layout and mgr_layout["buckets"] != MGR_AX["buckets"]:
+            # The F4 walk indexes the bucket walk's pointer array, which on this
+            # layout holds 8-byte {id, key, id} records, not the info objects:
+            # a live write through it would land in the record stream.
+            note(f"F4 (--f4 {f4})              NOT built: the walk reaches its entry through a pointer "
+                 f"array that no longer holds the info objects on this layout; building without F4")
+            f4 = None
         note(f"manager scan window game+{win_lo:#x}..{win_hi:#x} ({(win_hi - win_lo) // 8} qwords)")
 
     print("\npatching")
@@ -1634,11 +1733,12 @@ def main():
     if f4 is not None:
         apply_f4(asi, f4)
     elif housing and "--dump-mgr" in sys.argv:
-        # Build DX: the AY capacity gate stays closed (no walk), the slot
-        # patcher is replaced by a one-shot read-only dump of the manager.
+        # Builds DX / DY: the AY capacity gate stays closed (no F4 walk). DX
+        # (--dump-only) replaces the slot patcher by a read-only dump of the
+        # manager; DY keeps the (guarded) patcher and logs its result next to it.
         if no_chests:
-            fail("--dump-mgr without --f4 replaces the slot patcher call; drop --no-chest-slots")
-        apply_priv_diag(asi, True, walk_open=False)
+            fail("--dump-mgr without --f4 wraps the slot patcher call; drop --no-chest-slots")
+        apply_priv_diag(asi, True, walk_open=False, dump_only="--dump-only" in sys.argv)
 
     # (5) build tag
     at = bytes(asi.img).find(OLD_TAG)
@@ -1646,7 +1746,7 @@ def main():
         fail("build tag not unique")
     suffix = {None: "AZ" if housing else "AY", "dry": "BA", "live": "BB"}[f4]
     if f4 is None and housing and "--dump-mgr" in sys.argv:
-        suffix = "DX"
+        suffix = "DX" if "--dump-only" in sys.argv else "DY"
     if no_chests:
         suffix = "BC"
     tag = f"CD {build}.{suffix}".encode()

@@ -3,8 +3,8 @@
 #
 #   .\MAJ-mod.ps1            -> construit et installe la version complete
 #   .\MAJ-mod.ps1 -Test      -> version "lecture seule" (n'ecrit rien dans le jeu)
-#   .\MAJ-mod.ps1 -Diagnostic -> releve la memoire du jeu dans le journal, sans rien ecrire
-#                                (ouvrir les panneaux fonctionne, pas d'agrandissement)
+#   .\MAJ-mod.ps1 -Diagnostic -> comme la version normale pour les coffres, et en plus copie
+#                                dans le journal ce que le mod voit dans la memoire du jeu
 #   .\MAJ-mod.ps1 -Jeu "D:\...\bin64"   -> si le jeu n'est pas trouve tout seul
 
 param(
@@ -105,10 +105,10 @@ if ($SansAgrandissement) {
     Info "a leur taille normale). Sert a comparer."
 } elseif ($Diagnostic) {
     $suffixe = "DX"; $options = @("--housing", "--dump-mgr")
-    Info "mode DIAGNOSTIC : le mod copie dans son journal le contenu de la memoire"
-    Info "du gestionnaire d'inventaire du jeu. Il ne modifie RIEN dans le jeu et"
-    Info "n'agrandit rien : sert uniquement a retrouver ou le jeu a deplace les"
-    Info "donnees des coffres, pour pouvoir reparer l'agrandissement."
+    Info "mode DIAGNOSTIC : agrandit les coffres de maison comme la version normale"
+    Info "(uniquement les coffres reconnus a leur signature : 10 places, plafond"
+    Info "1000), et copie en plus dans son journal ce qu'il voit dans la memoire du"
+    Info "jeu, pour verifier que les donnees sont bien celles qu'on croit."
 } elseif ($CoffresNormaux) {
     $suffixe = "BC"; $options = @("--housing", "--no-chest-slots", "--f4", "live")
     Info "mode COFFRES NORMAUX : tout fonctionne comme d'habitude, sauf que les"
@@ -193,7 +193,8 @@ Write-Host "  TERMINE. Maintenant :" -ForegroundColor White
 Write-Host ""
 if ($Diagnostic) {
     Write-Host "   1. Lance le jeu et charge ta sauvegarde."
-    Write-Host "   2. Attends une dizaine de secondes dans le jeu (rien d'autre a faire)."
+    Write-Host "   2. Ouvre une fois chaque panneau : F4, F5, F6, F7, F8, F9 (Echap entre chaque)."
+    Write-Host "      Regarde la taille affichee des coffres : 1000 au lieu de 10 ?"
     Write-Host "   3. QUITTE le jeu, puis envoie a Claude le fichier journal ci-dessous."
 } else {
     Write-Host "   1. Lance le jeu et charge ta sauvegarde."

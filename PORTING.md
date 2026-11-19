@@ -223,6 +223,12 @@ C'est l'intérêt de numéroter : la réponse est arrivée en un seul essai.
 
 ---
 
+
+> **3732 :** la table des objets (`[mgr+0x20]`, compte `[mgr+0x28]`, éléments de
+> `0x18` octets, pointeur en `+8`) est **mesurée, pas dérivée** (`INFO_TABLE`
+> dans le script). La garde sur la signature `10`/`1000` la remplace à
+> l'exécution ; voir `PORT-3732.md`.
+
 ## 6 bis. Retour d'expérience 2944 (20 septembre 2026)
 
 Deuxième portage, cinq jours après 2850 : `README`/`PORT-2944.md`. Ce qu'il a
@@ -461,6 +467,28 @@ déplacement et prend le groupe qui charge le plus de globales distinctes (il do
 battre le second 2 contre 1), puis lit les trois autres champs par vote. Les huit
 lectures du code d'origine (`MGR_SITES`) sont réécrites d'un octet chacune. Il
 reste à localiser la paire de capacité dans les fiches : voir `PORT-3732.md`.
+
+**Suite (même jour) : les « fiches » n'en étaient pas.** Le deuxième relevé
+affichait 24 pointeurs distants de **8 octets** : des fenêtres qui se
+recouvrent sur un flux d'enregistrements `{u32 j ; u16 clé ; u16 j}`, pas des
+objets. Les vrais objets sont derrière une autre table, `[mgr+0x20]`
+(éléments de `0x18` octets, pointeur en `+8`, nul tant que le jeu ne l'a pas
+chargé), que lit le getter du jeu (`cmp [mgr+0x28]`). ⚠️ **Leçons** :
+
+1. **Des pointeurs d'« entrée » espacés de moins que la taille d'une entrée
+   sont une alerte** : on regarde un index, pas des objets. Le relevé l'a dit
+   d'un coup d'œil (`…9F0, …9F8, …A00`).
+2. **Un `__try/__except` ne couvre que ses propres adresses.** Un correctif
+   déplacé dans un trampoline hors de la fonction protégée perd la protection :
+   la première lecture est restée en place, le trampoline ne lit que le mot
+   suivant d'une page déjà lue.
+3. **Quand la disposition n'est pas certaine, écrire seulement sur une
+   signature.** Un coffre porte `10` en `+0x10` *et* `1000` en `+0x14` ; la
+   garde exige les deux, donc une mauvaise hypothèse coûte la fonction, jamais
+   des données.
+4. **F4 n'est pas reconstruit** quand la disposition n'est pas celle d'AX
+   (dégradation en AZ, signalée dans le journal de build) : son parcours indexe
+   le flux d'enregistrements et écrirait dedans.
 
 ## 7. Boîte à outils quand une ancre casse
 
