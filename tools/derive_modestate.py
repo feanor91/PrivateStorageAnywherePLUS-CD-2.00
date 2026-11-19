@@ -48,13 +48,21 @@ def find_tag_pool(pe, data):
         raise SystemExit("tag pool not found: 'ingame-global' is absent")
     anchor += 1
     # The pool is reordered between builds (2944 moved "store" 0x70 bytes
-    # before the anchor), so look on both sides of it.
-    lo, hi = max(0, anchor - 0x200), anchor + 0x200
+    # before the anchor) and it grows: on 3663 "interaction", "hud-play",
+    # "subtitle" and "quickslot" sit 0x238..0x268 past it, outside the old
+    # +-0x200 window, so the sub-mode table lost its `interaction` entry and
+    # the build stopped. Look on both sides, wide enough to absorb that, and
+    # refuse an ambiguous name rather than pick one: each tag is a whole
+    # NUL-delimited string that occurs once in the image.
+    lo, hi = max(0, anchor - 0x800), anchor + 0x800
     out = {}
     for tag in TAGS:
-        at = data.find(b"\x00" + tag + b"\x00", lo, hi)
+        pat = b"\x00" + tag + b"\x00"
+        at = data.find(pat, lo, hi)
         if at < 0:
             continue
+        if data.find(pat, at + 1, hi) >= 0:
+            raise SystemExit(f"tag pool: {tag.decode()!r} occurs twice near the anchor")
         off = at + 1
         try:
             out[base + pe.get_rva_from_offset(off)] = tag.decode()

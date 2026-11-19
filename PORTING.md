@@ -42,6 +42,10 @@ ces cas :
 
 | `STOP: manager window … is not inside one data section` (au **build**, pas en jeu) | un `mov r10,[rip+X]` parasite est entré dans la fenêtre de recherche. Sur 3527 c'était un stub d'obfuscation du jeu (adresse de retour calculée) : vraie instruction, cible non alignée et dans `.text`. Le filtre de forme est en place depuis ; si ça revient, lire la ligne `dropped … non-pointer candidate(s)` |
 
+| `STOP: the gameplay sub-mode ('interaction') is not unique: []` (au **build**) | la liste des noms d'étiquettes a grandi au-delà de la fenêtre de `find_tag_pool` : les noms hors fenêtre ne sont jamais associés à une adresse et disparaissent **sans message** des entrées de la table (comparer la ligne `jump table` avec celle d'un build qui marchait). Fenêtre ±0x800 depuis 3663 |
+| `STOP: too few manager globals found` (au **build**) | l'amas de globales de gestionnaires n'est plus dérivable (le parcours par seaux est sorti dans des fonctions membres). Depuis 3663 le script retombe sur toute la section de données de `mainChar` ; ce STOP ne revient que si `mainChar` n'est dans aucune section de données |
+| `manager scan window … (1106432 qwords)` au build, puis aucune ligne `[INV] InventoryInfoManager global` en jeu | la fenêtre de repli ne contient pas la globale : le gestionnaire n'est plus tenu par une globale de cette section (voir `PORT-3663.md`) |
+
 **Toujours copier le log avant de relancer le jeu** : il est écrasé au lancement.
 
 ---
@@ -384,6 +388,36 @@ paire de capacité toujours en `+0x10/+0x14`. Détails dans `PORT-3527.md`.
 coffres agrandis au démarrage, aucun refus (`no entry`, `no container`,
 `ABORT`, `FATAL` : zéro). Journal dans `docs/logs-3527/`.
 
+## 6 sexies. Retour d'expérience 3663 (19 novembre 2026)
+
+Deux arrêts de build indépendants, et pour la première fois aucun des deux ne
+vient d'une adresse déplacée.
+
+**1. Un nom perdu en silence.** `find_tag_pool` cherchait les onze noms
+d'étiquettes à ±0x200 de `ingame-global`. Le pool a grandi : `interaction`,
+`hud-play`, `subtitle` et `quickslot` sont passés à +0x238..+0x268. Aucune
+erreur à cet endroit : ces noms ont simplement disparu des entrées de la table
+des sous-modes, et le build est mort trois étapes plus loin sur une
+conséquence (`'interaction' is not unique: []`). ⚠️ **Leçon de méthode** : la
+ligne `jump table …` du début du build est le premier endroit où regarder, et
+elle se compare à celle d'un build qui marchait — ici `[17]=hud-info` au lieu
+de `[17]=hud-info/hud-play/interaction` disait tout. Une recherche bornée par
+une fenêtre devrait signaler ce qu'elle ne trouve pas, pas l'omettre.
+Corrigé : fenêtre ±0x800, et un nom trouvé deux fois arrête le build.
+
+**2. Un amas qui n'existe plus.** Le parcours par seaux est maintenant sorti en
+fonctions membres qui reçoivent le gestionnaire dans `rcx` (59 fonctions, 223
+appels) : les 91 `mov r10,[rip+G]` en ligne sont partis, et les appelants ne
+chargent pas le gestionnaire depuis une globale à portée. Voir `PORT-3663.md`
+pour les mesures. Comme la fenêtre n'est qu'une borne de vitesse et que
+l'exactitude vient du test du vptr RTTI, le repli est **toute la section de
+données qui contient `mainChar`** (dérivée, pas tapée). La voie de l'amas reste
+prioritaire : les builds où elle marche sont inchangés octet pour octet.
+
+Ce qui n'est **pas** vérifié par le build sur 3663, et que seul le journal en
+jeu dira : que la globale du gestionnaire soit encore dans cette section, que
+la paire de capacité soit toujours en `+0x10/+0x14`, que `CAMP_KEY = 8` tienne.
+
 ## 7. Boîte à outils quand une ancre casse
 
 Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
@@ -401,6 +435,13 @@ Techniques qui ont marché sur 2850 (voir `PORT-2850.md` pour les détails) :
   (vraie instruction, pas d'entrée `.pdata`, cible dans `.text`). Filtrer sur
   ce que le code fait ensuite de la valeur — alignement et section — et
   afficher les candidats écartés. Voir §6 quinquies.
+- **Comparer la ligne `jump table` du build à celle d'un build qui marchait** :
+  un nom d'étiquette hors fenêtre de recherche disparaît des entrées sans
+  aucun message (3663).
+- **Quand l'amas de globales disparaît, relâcher la borne, pas le test** : si le
+  scan runtime est exact par ailleurs (vptr RTTI), la fenêtre n'est qu'une
+  optimisation de vitesse ; tomber sur toute la section de données qui contient
+  une globale déjà dérivée coûte du temps, jamais de la sûreté (3663).
 - **Désassembler fonction par fonction via `.pdata`** (capstone) : un balayage
   linéaire depuis un point arbitraire se désynchronise et rate des sites.
 - **Accrocher une vtable plutôt qu'un prologue** quand les octets manquent :

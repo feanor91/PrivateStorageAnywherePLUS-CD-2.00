@@ -567,7 +567,7 @@ def data_section_of(g: Game, rva):
     return None if s is None or s.Characteristics & 0x20000000 else s
 
 
-def derive_manager_window(g: Game):
+def derive_manager_window(g: Game, anchor: int):
     """The block of StaticInfoManager pointer globals: every `mov r10,[rip+G]`
     that feeds the bucket idiom `shl r11,8 ; add r11,[r10+0x78]`. The scan
     window is that cluster padded by 64 KB each side, page-aligned, and must
@@ -580,7 +580,19 @@ def derive_manager_window(g: Game):
     -- a computed return address, with no .pdata entry of its own) sitting
     0x60 bytes before an unrelated bucket site. It is a real instruction, so
     no instruction-boundary check would have rejected it; but its target is
-    unaligned and lands in .text, which no pointer global's is."""
+    unaligned and lands in .text, which no pointer global's is.
+
+    On 3663 there is no cluster to find: the compiler outlined the bucket walk
+    into member functions that receive the manager in a register
+    (`mov rdi,rcx ; ... shl r10,8 ; add r10,[rdi+0x78]`), so the 91 inlined
+    `mov r10,[rip+G]` sites are gone -- 67 sites remain in the same shape with
+    any base register, and none of their 223 callers loads the manager from a
+    global within reach. The window is only a speed bound for INVSCAN, whose
+    exactness comes from the RTTI vtable test on every candidate, so when no
+    cluster can be derived the window falls back to the whole data section
+    that holds the mainChar global (`anchor`): the manager's global is a
+    singleton of the same family, and it was at mainChar+0xF08 on 3460, 3479
+    and 3527. The cluster route is kept first, so those builds are unchanged."""
     bucket = bytes.fromhex("49C1E3084D035A78")
     globs = collections.Counter()
     dropped = []
@@ -602,7 +614,19 @@ def derive_manager_window(g: Game):
                     continue
                 globs[tgt] += 1
     if len(globs) < 10:
-        fail(f"too few manager globals found ({len(globs)})")
+        sec = data_section_of(g, anchor)
+        if sec is None:
+            fail(f"too few manager globals found ({len(globs)}) and the mainChar "
+                 f"global {anchor:#x} is not in a data section to fall back on")
+        lo = sec.VirtualAddress
+        hi = lo + sec.Misc_VirtualSize
+        if hi - lo > 0x1000000:
+            fail(f"too few manager globals found ({len(globs)}) and the fallback "
+                 f"section is too large to scan ({hi - lo:#x})")
+        note(f"manager globals: only {len(globs)} found (the bucket walk is outlined on "
+             f"this build); window = the whole data section holding mainChar "
+             f"({sec.Name.rstrip(bytes(1)).decode(errors='replace')})")
+        return lo, hi
     lo, hi = min(globs), max(globs) + 8
     lo = (lo - 0x10000) & ~0xFFF
     hi = (hi + 0x10000 + 0xFFF) & ~0xFFF
@@ -1312,7 +1336,7 @@ def main():
     if housing:
         inv_vt = derive_inventory_vtable(g)
         note(f"InventoryInfoManager vtable game+{inv_vt:#x}")
-        win_lo, win_hi = derive_manager_window(g)
+        win_lo, win_hi = derive_manager_window(g, mainchar)
         note(f"manager scan window game+{win_lo:#x}..{win_hi:#x} ({(win_hi - win_lo) // 8} qwords)")
 
     print("\npatching")
