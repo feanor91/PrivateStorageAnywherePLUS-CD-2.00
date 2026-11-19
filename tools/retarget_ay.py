@@ -173,6 +173,7 @@ PS_P = PD_RVA + 112          # qword: the pointer the inner loop is reading
 PS_K = PD_RVA + 120          # dword: inner index
 PS_J = PD_RVA + 136          # dword: entry index
 PS_E = PD_RVA + 144          # qword: the entry the dump is reading
+PS_N = PD_RVA + 152          # dword: how many entries the manager says it holds (capped)
 PS_RET = PD_RVA + 128        # dword: the slot patcher's return value
 PS_LAST = PD_RVA + 132       # dword: ... as last logged; preset to a value it cannot return
 PS_LAST_INIT = 0x7FFFFFFF
@@ -851,7 +852,7 @@ def apply_f4(asi, mode):
     apply_priv_diag(asi, "--dump-mgr" in sys.argv)
 
 
-def apply_priv_diag(asi, dump_mgr):
+def apply_priv_diag(asi, dump_mgr, walk_open=True):
     """Say which of the twelve refusals fired, and what the manager looks like.
 
     Two things fail on build 3460, and the log says almost nothing about
@@ -884,6 +885,14 @@ def apply_priv_diag(asi, dump_mgr):
         Every deref is behind `rdbl`, so a wrong guess logs nothing rather
         than crashing.
 
+    With walk_open=False (build DX: `--housing --dump-mgr`, no `--f4`) the
+    private-storage walk stays closed behind AY's capacity gate and the slot
+    patcher is not run at all: the wrapper's `call SLOT_PATCHER` becomes a call
+    to a stub that dumps the manager once and returns 0. Nothing is read
+    outside `rdbl` and nothing is written, which is the point -- on 3732 the
+    patcher returned -1 (its SEH handler fired) and the game died right after,
+    so the build that says where the layout moved must not run either.
+
     It lives in the 1984 bytes of zero padding between AX's string pool (ends
     at 0x4683F) and its next block (0x47000) -- unreferenced: no branch and no
     absolute pointer in the image lands there, and the section is RX, so
@@ -903,7 +912,8 @@ def apply_priv_diag(asi, dump_mgr):
     if slot_live:
         strings += [("slots", b"  [DBG] slot patcher -> %d")]
     if dump_mgr:
-        strings += [("mgr", b"  [DBG] mgr+%02X = %016llX"),
+        strings += [("cnt", b"  [DBG] mgr+08 count=%u  mgr+58 array=%016llX"),
+                    ("mgr", b"  [DBG] mgr+%02X = %016llX"),
                     ("ent", b"  [DBG] entry[%u] = %016llX"),
                     ("word", b"  [DBG]   entry[%u] +%02X = %016llX")]
     fmt = {}
@@ -915,26 +925,39 @@ def apply_priv_diag(asi, dump_mgr):
 
     # One ten-byte stub per refusal (thirteen for the two that can dump).
     stubs = {}
-    for _, _, stage, dump in PRIV_FAIL_SITES:
-        stubs[stage] = e.here()
-        if dump and dump_mgr:
-            e.h("48 89 C1")                      # mov rcx,rax  (the manager)
-            e.j("E8", "dump")
-        e.h("BA" + struct.pack("<I", stage).hex())
-        e.j("E9", "tail")
-    e.label("tail")
-    e.h("80 7C 24 60 00")                        # cmp byte [rsp+0x60],0
-    e.rip("0F 84", PRIV_DONE)                    # quiet call: say nothing
-    e.h("44 8B 44 24 48")                        # mov r8d,[rsp+0x48]  (the key)
-    e.h("41 89 C1")                              # mov r9d,eax
-    e.rip("48 8D 0D", fmt["stage"])
-    e.rip("E8", LOGGER)
-    e.rip("E9", PRIV_DONE)
+    if walk_open:
+        for _, _, stage, dump in PRIV_FAIL_SITES:
+            stubs[stage] = e.here()
+            if dump and dump_mgr:
+                e.h("48 89 C1")                  # mov rcx,rax  (the manager)
+                e.j("E8", "dump")
+            e.h("BA" + struct.pack("<I", stage).hex())
+            e.j("E9", "tail")
+        e.label("tail")
+        e.h("80 7C 24 60 00")                    # cmp byte [rsp+0x60],0
+        e.rip("0F 84", PRIV_DONE)                # quiet call: say nothing
+        e.h("44 8B 44 24 48")                    # mov r8d,[rsp+0x48]  (the key)
+        e.h("41 89 C1")                          # mov r9d,eax
+        e.rip("48 8D 0D", fmt["stage"])
+        e.rip("E8", LOGGER)
+        e.rip("E9", PRIV_DONE)
 
     # PW: replaces `call SLOT_PATCHER`. Dumps the manager first, then calls the
     # patcher and logs what it returned. 0x28 keeps the alignment the patcher
     # arrives with and covers the shadow space of all three calls.
-    if slot_live:
+    if not walk_open:
+        if not (slot_live and dump_mgr):
+            fail("the read-only dump build needs the slot patcher call and --dump-mgr")
+        e.align(16)
+        e.label("pw")
+        e.h("48 83 EC 28")
+        e.rip("48 8B 05", INVMGR_PTR); e.h("48 85 C0"); e.j("0F 84", "pwz")
+        e.h("48 8B 08"); e.h("48 85 C9"); e.j("0F 84", "pwz")
+        e.j("E8", "dump")
+        e.label("pwz")
+        e.h("31 C0")                             # the patcher is NOT run: return 0
+        e.h("48 83 C4 28"); e.h("C3")
+    elif slot_live:
         e.align(16)
         e.label("pw")
         e.h("48 83 EC 28")
@@ -965,7 +988,7 @@ def apply_priv_diag(asi, dump_mgr):
     asi.img[asi.off(free):asi.off(free) + len(code)] = code
     struct.pack_into("<I", asi.img, asi.off(PS_LAST), PS_LAST_INIT)
 
-    for rva, opc, stage, _ in PRIV_FAIL_SITES:
+    for rva, opc, stage, _ in (PRIV_FAIL_SITES if walk_open else ()):
         asi.expect(rva, opc + struct.pack("<i", PRIV_FAIL_MSG - (rva + 6)).hex())
         at = asi.off(rva) + 2
         asi.img[at:at + 4] = struct.pack("<i", stubs[stage] - (rva + 6))
@@ -974,42 +997,68 @@ def apply_priv_diag(asi, dump_mgr):
         at = asi.off(SLOT_CALL) + 1
         asi.img[at:at + 4] = struct.pack("<i", free + e.lbl["pw"] - (SLOT_CALL + 5))
     note(f"[PRIV] diagnostics           rva {free:#x}: {len(code)} bytes in the padding; "
-         f"{len(PRIV_FAIL_SITES)} refusals numbered"
-         f"{', slot patcher result logged' if slot_live else ''}"
+         + (f"{len(PRIV_FAIL_SITES)} refusals numbered" if walk_open
+            else "READ-ONLY: walk closed, slot patcher replaced by the dump")
+         + f"{', slot patcher result logged' if slot_live and walk_open else ''}"
          f"{', manager dumped (--dump-mgr)' if dump_mgr else ''} "
          f"({PRIV_GAP_END - free - len(code)} bytes of padding left)")
 
 
 def emit_dump(e, asi, fmt):
-    """The --dump-mgr block: the manager's fields, then all 24 entries."""
+    """The --dump-mgr block: the manager's fields, then every entry it holds.
+
+    Every read is behind `rdbl` (a VirtualQuery-backed readable-page test), the
+    entry count is read from `[mgr+8]` instead of assumed to be 24 (capped at
+    0x40), and an entry is dumped as sixteen qwords rather than fourteen --
+    3732 may have changed the entry's size as 3460 changed its fields, and a
+    count or size that is too small is exactly what hid the layout last time.
+    All state lives in .psdata; the registers do not survive the calls."""
     e.align(16)
     e.label("dump")
     e.h("48 83 EC 38")
     e.rip("83 3D", PS_DMPD, tail=1); e.h("00"); e.j("0F 85", "dmpout")
     e.rip("C7 05", PS_DMPD, tail=4); e.h("01 00 00 00")
     e.rip("48 89 0D", PS_MGR)
+    # the manager's first 0x80 bytes must be readable before anything below
+    e.rip("48 8B 0D", PS_MGR); e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
+    e.rip("48 8B 0D", PS_MGR); e.h("48 83 C1 7F")            # add rcx,0x7F
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
+    # count and array, so the log says what the walk would have been given
+    e.rip("48 8B 05", PS_MGR)
+    e.h("8B 50 08")                                         # mov edx,[rax+8]
+    e.h("4C 8B 40 58")                                      # mov r8,[rax+0x58]
+    e.rip("48 8D 0D", fmt["cnt"]); e.rip("E8", LOGGER)
+    e.rip("48 8B 05", PS_MGR)
+    e.h("8B 40 08")                                         # mov eax,[rax+8]
+    e.h("83 F8 40"); e.j("0F 86", "capok")                  # cmp eax,0x40 ; jbe
+    e.h("B8 40 00 00 00")
+    e.label("capok")
+    e.rip("89 05", PS_N)
     e.rip("C7 05", PS_I, tail=4); e.h("00 00 00 00")
-    # the manager's own first 32 qwords, flat
+    # the manager's own first 48 qwords, flat
     e.label("l1")
     e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
-    e.h("4C 8B 04 C8")                           # mov r8,[rax+rcx*8]
-    e.h("89 CA"); e.h("C1 E2 03")                # edx = index*8
+    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "l1done")
+    e.rip("48 8B 05", PS_MGR); e.rip("8B 0D", PS_I)
+    e.h("4C 8B 04 C8")                                      # mov r8,[rax+rcx*8]
+    e.h("89 CA"); e.h("C1 E2 03")                           # edx = index*8
     e.rip("48 8D 0D", fmt["mgr"]); e.rip("E8", LOGGER)
     e.rip("8B 05", PS_I); e.h("FF C0"); e.rip("89 05", PS_I)
-    e.h("83 F8 20"); e.j("0F 82", "l1")
-    # then the entry array the walk and the patcher both index, two levels
-    # down: [[mgr+0x58] + j*8] + k*8. Stage 12 says the array and the entry
-    # pointer are sound and only the capacity word inside the entry is not, so
-    # this is the one dump that locates it -- the five housing chests read 10
-    # at whatever offset it has moved to, and the private warehouse 240.
+    e.h("83 F8 30"); e.j("0F 82", "l1")
+    e.label("l1done")
+    # the entry array [mgr+0x58]: P, then entry j at [P + j*8], then its words
     e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 58")
     e.rip("48 89 0D", PS_P)
     e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
     e.rip("C7 05", PS_J, tail=4); e.h("00 00 00 00")
     e.label("l2")
     e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_J)
-    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_E)
-    e.h("49 89 C8")                              # mov r8,rcx  (the entry)
+    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.rip("48 8B 05", PS_P); e.rip("8B 0D", PS_J)
+    e.h("48 8B 0C C8"); e.rip("48 89 0D", PS_E)              # E = [P + j*8]
+    e.h("49 89 C8")                                         # mov r8,rcx  (the entry)
     e.rip("8B 15", PS_J)
     e.rip("48 8D 0D", fmt["ent"]); e.rip("E8", LOGGER)
     e.rip("48 8B 0D", PS_E)
@@ -1017,15 +1066,18 @@ def emit_dump(e, asi, fmt):
     e.rip("C7 05", PS_K, tail=4); e.h("00 00 00 00")
     e.label("l3")
     e.rip("48 8B 05", PS_E); e.rip("8B 0D", PS_K)
-    e.h("4C 8B 0C C8")                           # mov r9,[rax+rcx*8]
-    e.h("41 89 C8"); e.h("41 C1 E0 03")          # r8d = k*8
+    e.h("48 8D 0C C8")                                      # lea rcx,[rax+rcx*8]
+    e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "next")
+    e.rip("48 8B 05", PS_E); e.rip("8B 0D", PS_K)
+    e.h("4C 8B 0C C8")                                      # mov r9,[rax+rcx*8]
+    e.h("41 89 C8"); e.h("41 C1 E0 03")                     # r8d = k*8
     e.rip("8B 15", PS_J)
     e.rip("48 8D 0D", fmt["word"]); e.rip("E8", LOGGER)
     e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
-    e.h("83 F8 0E"); e.j("0F 82", "l3")          # 0x70 bytes per entry
+    e.h("83 F8 10"); e.j("0F 82", "l3")                     # sixteen qwords per entry
     e.label("next")
     e.rip("8B 05", PS_J); e.h("FF C0"); e.rip("89 05", PS_J)
-    e.h("83 F8 18"); e.j("0F 82", "l2")          # dword [mgr+8] reads 24
+    e.rip("3B 05", PS_N); e.j("0F 82", "l2")                # j < the manager's own count
     e.label("dmpout")
     e.h("48 83 C4 38"); e.h("C3")
 
@@ -1458,12 +1510,20 @@ def main():
             note(f"housing slot patch           rva {calls[0]:#x}: DISABLED (--no-chest-slots)")
     if f4 is not None:
         apply_f4(asi, f4)
+    elif housing and "--dump-mgr" in sys.argv:
+        # Build DX: the AY capacity gate stays closed (no walk), the slot
+        # patcher is replaced by a one-shot read-only dump of the manager.
+        if no_chests:
+            fail("--dump-mgr without --f4 replaces the slot patcher call; drop --no-chest-slots")
+        apply_priv_diag(asi, True, walk_open=False)
 
     # (5) build tag
     at = bytes(asi.img).find(OLD_TAG)
     if at < 0 or bytes(asi.img).find(OLD_TAG, at + 1) >= 0:
         fail("build tag not unique")
     suffix = {None: "AZ" if housing else "AY", "dry": "BA", "live": "BB"}[f4]
+    if f4 is None and housing and "--dump-mgr" in sys.argv:
+        suffix = "DX"
     if no_chests:
         suffix = "BC"
     tag = f"CD {build}.{suffix}".encode()

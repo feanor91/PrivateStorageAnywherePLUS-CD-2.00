@@ -3,12 +3,15 @@
 #
 #   .\MAJ-mod.ps1            -> construit et installe la version complete
 #   .\MAJ-mod.ps1 -Test      -> version "lecture seule" (n'ecrit rien dans le jeu)
+#   .\MAJ-mod.ps1 -Diagnostic -> releve la memoire du jeu dans le journal, sans rien ecrire
+#                                (ouvrir les panneaux fonctionne, pas d'agrandissement)
 #   .\MAJ-mod.ps1 -Jeu "D:\...\bin64"   -> si le jeu n'est pas trouve tout seul
 
 param(
     [switch]$Test,
     [switch]$SansAgrandissement,
     [switch]$CoffresNormaux,
+    [switch]$Diagnostic,
     [string]$Jeu
 )
 
@@ -100,6 +103,12 @@ if ($SansAgrandissement) {
     Info "mode SANS AGRANDISSEMENT : les touches F4-F9 ouvrent les panneaux,"
     Info "mais aucune capacite n'est modifiee (coffres et entrepot restent"
     Info "a leur taille normale). Sert a comparer."
+} elseif ($Diagnostic) {
+    $suffixe = "DX"; $options = @("--housing", "--dump-mgr")
+    Info "mode DIAGNOSTIC : le mod copie dans son journal le contenu de la memoire"
+    Info "du gestionnaire d'inventaire du jeu. Il ne modifie RIEN dans le jeu et"
+    Info "n'agrandit rien : sert uniquement a retrouver ou le jeu a deplace les"
+    Info "donnees des coffres, pour pouvoir reparer l'agrandissement."
 } elseif ($CoffresNormaux) {
     $suffixe = "BC"; $options = @("--housing", "--no-chest-slots", "--f4", "live")
     Info "mode COFFRES NORMAUX : tout fonctionne comme d'habitude, sauf que les"
@@ -182,10 +191,16 @@ Write-Host ""
 Write-Host "  ------------------------------------------------------------" -ForegroundColor White
 Write-Host "  TERMINE. Maintenant :" -ForegroundColor White
 Write-Host ""
-Write-Host "   1. Lance le jeu et charge ta sauvegarde."
-Write-Host "   2. Appuie sur F4 (entrepot prive), puis Echap."
-Write-Host "   3. Appuie sur F5, F6, F7, F8, F9 (les coffres), ferme a chaque fois."
-Write-Host "   4. Si tout s'ouvre : c'est bon, tu peux jouer."
+if ($Diagnostic) {
+    Write-Host "   1. Lance le jeu et charge ta sauvegarde."
+    Write-Host "   2. Attends une dizaine de secondes dans le jeu (rien d'autre a faire)."
+    Write-Host "   3. QUITTE le jeu, puis envoie a Claude le fichier journal ci-dessous."
+} else {
+    Write-Host "   1. Lance le jeu et charge ta sauvegarde."
+    Write-Host "   2. Appuie sur F4 (entrepot prive), puis Echap."
+    Write-Host "   3. Appuie sur F5, F6, F7, F8, F9 (les coffres), ferme a chaque fois."
+    Write-Host "   4. Si tout s'ouvre : c'est bon, tu peux jouer."
+}
 Write-Host ""
 Write-Host "   Si quelque chose ne marche pas : QUITTE LE JEU D'ABORD, puis envoie"
 Write-Host "   a Claude ce fichier journal (il est efface au lancement suivant) :"
