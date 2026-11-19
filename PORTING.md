@@ -405,7 +405,9 @@ de `[17]=hud-info/hud-play/interaction` disait tout. Une recherche bornée par
 une fenêtre devrait signaler ce qu'elle ne trouve pas, pas l'omettre.
 Corrigé : fenêtre ±0x800, et un nom trouvé deux fois arrête le build.
 
-**2. Un amas qui n'existe plus.** Le parcours par seaux est maintenant sorti en
+**2. Un amas qui n'existe plus.** *(Diagnostic corrigé en 3732 : voir §6 septies. Le
+parcours n'était pas sorti en fonctions ; c'est son déplacement qui avait changé.)*
+Le parcours par seaux est maintenant sorti en
 fonctions membres qui reçoivent le gestionnaire dans `rcx` (59 fonctions, 223
 appels) : les 91 `mov r10,[rip+G]` en ligne sont partis, et les appelants ne
 chargent pas le gestionnaire depuis une globale à portée. Voir `PORT-3663.md`
@@ -417,6 +419,48 @@ prioritaire : les builds où elle marche sont inchangés octet pour octet.
 Ce qui n'est **pas** vérifié par le build sur 3663, et que seul le journal en
 jeu dira : que la globale du gestionnaire soit encore dans cette section, que
 la paire de capacité soit toujours en `+0x10/+0x14`, que `CAMP_KEY = 8` tienne.
+
+## 6 septies. Retour d'expérience 3732 (19 novembre 2026)
+
+Le build complet de 3732 a **planté le jeu au lancement**. Deux causes, un seul
+fait : la disposition interne du gestionnaire d'inventaire a changé.
+
+| rôle | AX → 3527 | 3732 |
+|---|---|---|
+| nombre de seaux (diviseur) | `+0x68` | `+0x50` |
+| nombre de fiches | `+0x6C` et `+0x08` | `+0x54` |
+| tableau des seaux | `+0x78` | `+0x60` |
+| tableau des pointeurs de fiches | `+0x58` | `+0x68` |
+
+Le parcours de l'entrepôt privé lisait `[mgr+0x78]` comme tableau de seaux ; sur
+3732 cette case contient `0x0003000200010000`. Déréférencé hors de tout bloc
+SEH : plantage. Le patcheur de coffres, lui, est protégé et rendait `-1`, ce qui
+est ce qu'on voyait dans le journal juste avant la fin.
+
+⚠️ **Leçons de méthode** :
+
+1. **J'avais mal lu 3663.** Mon motif de recherche exigeait `+0x78`; le jeu en
+   utilise maintenant `+0x60`, que le motif ne pouvait pas voir. J'ai conclu « le
+   parcours est sorti en fonctions » à partir de 67 sites qui restaient, et j'ai
+   construit un repli sur ce diagnostic. Le repli a marché (il trouve le
+   gestionnaire par son vptr), mais il masquait que la disposition avait changé.
+   **Un motif qui ne trouve plus rien est un résultat à expliquer, pas à
+   contourner.** Le moyen de le voir : relâcher le motif d'un paramètre à la fois
+   (ici le déplacement) et compter.
+2. **Une version « lecture seule » vaut un aller-retour utilisateur.** Le build
+   de diagnostic (`DX`) désactive le parcours *et* le patcheur et n'écrit rien :
+   il ne peut pas replanter, donc il a rendu un journal exploitable au lieu d'un
+   second plantage.
+3. **La disposition se lit dans le code du jeu, pas seulement dans un relevé.**
+   Les fonctions qui chargent la globale du gestionnaire disent quels champs
+   sont lus et dans quel rôle (`cmp [M+0x54],0` ; `div [M+0x50]` ; `add [M+0x60]`).
+   Le relevé confirme, le désassemblage nomme.
+
+`derive_manager_layout` groupe maintenant tous les parcours par seaux par leur
+déplacement et prend le groupe qui charge le plus de globales distinctes (il doit
+battre le second 2 contre 1), puis lit les trois autres champs par vote. Les huit
+lectures du code d'origine (`MGR_SITES`) sont réécrites d'un octet chacune. Il
+reste à localiser la paire de capacité dans les fiches : voir `PORT-3732.md`.
 
 ## 7. Boîte à outils quand une ancre casse
 

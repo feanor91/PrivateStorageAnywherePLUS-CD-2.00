@@ -568,66 +568,143 @@ def data_section_of(g: Game, rva):
     return None if s is None or s.Characteristics & 0x20000000 else s
 
 
-def derive_manager_window(g: Game, anchor: int):
-    """The block of StaticInfoManager pointer globals: every `mov r10,[rip+G]`
-    that feeds the bucket idiom `shl r11,8 ; add r11,[r10+0x78]`. The scan
-    window is that cluster padded by 64 KB each side, page-aligned, and must
-    lie inside one non-code section of the image.
+MGR_IDIOM = re.compile(
+    rb"([\x48\x49\x4C\x4D])\xC1([\xE0-\xE7])\x08([\x48\x49\x4C\x4D])\x03([\x40-\x7F])([\x00-\x7F])", re.S)
 
-    A candidate is kept only if it could be the qword the idiom goes on to
-    dereference: 8-aligned, and in a data section. On 3527 the look-back swept
-    in a `mov r10,[rip+X]` belonging to one of the game's control-flow
-    obfuscation stubs (`mov r10,[rip+X] ; sub r10,imm ; xchg [rsp],r10 ; ret`
-    -- a computed return address, with no .pdata entry of its own) sitting
-    0x60 bytes before an unrelated bucket site. It is a real instruction, so
-    no instruction-boundary check would have rejected it; but its target is
-    unaligned and lands in .text, which no pointer global's is.
 
-    On 3663 there is no cluster to find: the compiler outlined the bucket walk
-    into member functions that receive the manager in a register
-    (`mov rdi,rcx ; ... shl r10,8 ; add r10,[rdi+0x78]`), so the 91 inlined
-    `mov r10,[rip+G]` sites are gone -- 67 sites remain in the same shape with
-    any base register, and none of their 223 callers loads the manager from a
-    global within reach. The window is only a speed bound for INVSCAN, whose
-    exactness comes from the RTTI vtable test on every candidate, so when no
-    cluster can be derived the window falls back to the whole data section
-    that holds the mainChar global (`anchor`): the manager's global is a
-    singleton of the same family, and it was at mainChar+0xF08 on 3460, 3479
-    and 3527. The cluster route is kept first, so those builds are unchanged."""
-    bucket = bytes.fromhex("49C1E3084D035A78")
-    globs = collections.Counter()
-    dropped = []
+def scan_bucket_sites(g: Game):
+    """Every bucket walk `shl R,8 ; add R,[M+Z]` (R the same register twice, no
+    SIB), as (rva, M, Z, G): G is the data qword M was loaded from by a
+    `mov M,[rip+G]` in the 0x60 bytes before, or None if there is none.
+
+    G must be 8-aligned and in a data section. On 3527 a `mov r10,[rip+X]`
+    from one of the game's control-flow obfuscation stubs
+    (`mov r10,[rip+X] ; sub r10,imm ; xchg [rsp],r10 ; ret`, a computed return
+    address, no .pdata entry) sat 0x60 bytes before an unrelated bucket site.
+    It is a real instruction, so no instruction-boundary test rejects it; its
+    target, unaligned and inside .text, is what gives it away."""
+    loads = {}
+    out = []
     for s in g.code:
         b = g.blob[s.VirtualAddress]
         va = s.VirtualAddress
-        p = 0
-        while True:
-            i = b.find(bucket, p)
-            if i < 0:
-                break
-            p = i + 1
+        for m in MGR_IDIOM.finditer(b):
+            rex_s, shl_m, rex_a, modrm, z = (m.group(k)[0] for k in range(1, 6))
+            if modrm & 7 == 4:
+                continue
+            if ((rex_a >> 2 & 1) << 3 | (modrm >> 3 & 7)) != ((rex_s & 1) << 3 | (shl_m & 7)):
+                continue
+            base = (rex_a & 1) << 3 | (modrm & 7)
+            if base not in loads:
+                loads[base] = re.compile(
+                    bytes([0x48 | ((base >> 3) << 2), 0x8B, ((base & 7) << 3) | 5]) + rb"(....)", re.S)
+            i = m.start()
             w0 = max(0, i - 0x60)
-            for m in re.finditer(rb"\x4C\x8B\x15(....)", b[w0:i], re.S):
-                at = va + w0 + m.start()
-                tgt = at + 7 + struct.unpack("<i", m.group(1))[0]
-                if tgt % 8 or data_section_of(g, tgt) is None:
-                    dropped.append((at, tgt))
-                    continue
-                globs[tgt] += 1
-    if len(globs) < 10:
+            tgt = None
+            for mm in loads[base].finditer(b[w0:i]):
+                t = va + w0 + mm.start() + 7 + struct.unpack("<i", mm.group(1))[0]
+                if t % 8 == 0 and data_section_of(g, t) is not None:
+                    tgt = t
+            out.append((va + i, base, z, tgt))
+    return out
+
+
+def vote_layout(g: Game, sites):
+    """What the bucket walk reads besides the bucket array, by majority over
+    the given sites: the bucket count (`div`), the entry count (the
+    `cmp dword [M+X],..` before it) and the pointer array the bucket's index
+    selects from (`mov r64,[M+W]` right after). Returns the three counters."""
+    from capstone import x86
+    mem = lambda op: op.type == x86.X86_OP_MEM
+    votes = {"div": collections.Counter(), "count": collections.Counter(),
+             "entries": collections.Counter()}
+    for rva, base, z, _ in sites:
+        f = g.merged_function(rva)
+        if not f:
+            continue
+        ins = g.dis(f[0], rva + 0x60 - f[0])
+        k = next((i for i, x in enumerate(ins) if x.address - g.base == rva), None)
+        if k is None or ins[k + 1].mnemonic != "add" or not mem(ins[k + 1].operands[1]):
+            continue
+        M = ins[k + 1].operands[1].mem.base
+        before = ins[max(0, k - 24):k]
+        for x in reversed(before):
+            if (x.mnemonic == "cmp" and mem(x.operands[0]) and x.operands[0].mem.base == M
+                    and x.operands[0].size == 4):
+                votes["count"][x.operands[0].mem.disp] += 1
+                break
+        dv = next((i for i in range(len(before) - 1, -1, -1) if before[i].mnemonic == "div"), None)
+        if dv is not None:
+            reg = before[dv].operands[0].reg
+            for x in reversed(before[:dv]):
+                if (x.mnemonic == "mov" and x.operands[0].type == x86.X86_OP_REG
+                        and x.operands[0].reg == reg and mem(x.operands[1])
+                        and x.operands[1].mem.base == M):
+                    votes["div"][x.operands[1].mem.disp] += 1
+                    break
+        for x in ins[k + 2:k + 16]:
+            if (x.mnemonic == "mov" and x.operands[0].type == x86.X86_OP_REG and mem(x.operands[1])
+                    and x.operands[1].mem.base == M and x.operands[1].size == 8
+                    and x.operands[1].mem.disp != z):
+                votes["entries"][x.operands[1].mem.disp] += 1
+                break
+    return votes
+
+
+def derive_manager_layout(g: Game, anchor: int):
+    """The block of StaticInfoManager pointer globals, and how the managers lay
+    out their tables. Returns (window_lo, window_hi, layout) where layout is
+    {"div", "count", "buckets", "entries"} -- the displacements of the bucket
+    count, the entry count, the bucket array and the entry-pointer array -- or
+    None when no cluster could be derived.
+
+    The bucket walk (`hash % [M+div]`, `shl 8`, `+ [M+buckets]`) is inlined at
+    thousands of sites, each right after `mov M,[rip+G]`. Sites are grouped by
+    the bucket-array displacement, and the group that loads the most distinct
+    globals is the managers' own layout: +0x78 up to 3527, +0x60 on 3732,
+    where the whole family shrank by 0x18 bytes (the old shape is still in the
+    image, on 66 sites that no longer load a global). It must beat the runner-up
+    two to one or the build stops. The window is that group's globals padded by
+    64 KB each side, page-aligned, inside one non-code section.
+
+    On 3663 the old +0x78 idiom found nothing and this fell back to scanning
+    the whole data section that holds mainChar; that fallback stays, but it was
+    only ever needed because the search assumed +0x78. INVSCAN's exactness comes
+    from the RTTI vtable test, so the window is only a speed bound."""
+    sites = scan_bucket_sites(g)
+    by_z = collections.defaultdict(list)
+    for site in sites:
+        if site[3] is not None:
+            by_z[site[2]].append(site)
+    ranked = sorted(by_z.items(), key=lambda kv: -len({x[3] for x in kv[1]}))
+    counts = [(z, len({x[3] for x in lst})) for z, lst in ranked]
+    if not ranked or counts[0][1] < 10:
         sec = data_section_of(g, anchor)
         if sec is None:
-            fail(f"too few manager globals found ({len(globs)}) and the mainChar "
+            fail(f"too few manager globals found ({counts}) and the mainChar "
                  f"global {anchor:#x} is not in a data section to fall back on")
         lo = sec.VirtualAddress
         hi = lo + sec.Misc_VirtualSize
         if hi - lo > 0x1000000:
-            fail(f"too few manager globals found ({len(globs)}) and the fallback "
+            fail(f"too few manager globals found ({counts}) and the fallback "
                  f"section is too large to scan ({hi - lo:#x})")
-        note(f"manager globals: only {len(globs)} found (the bucket walk is outlined on "
-             f"this build); window = the whole data section holding mainChar "
+        note(f"manager globals: no bucket-walk group loads 10 globals {counts[:3]}; window = "
+             f"the whole data section holding mainChar "
              f"({sec.Name.rstrip(bytes(1)).decode(errors='replace')})")
-        return lo, hi
+        return lo, hi, None
+    if len(counts) > 1 and counts[0][1] < 2 * counts[1][1]:
+        fail(f"two bucket-walk layouts load a comparable number of globals: {counts[:3]}")
+    z, lst = ranked[0]
+    globs = {x[3] for x in lst}
+    step = max(1, len(lst) // 80)
+    votes = vote_layout(g, lst[::step])
+    lay = {"buckets": z}
+    for role in ("div", "count", "entries"):
+        c = votes[role]
+        total = sum(c.values())
+        if not total or c.most_common(1)[0][1] < 0.8 * total:
+            fail(f"manager layout: no clear majority for {role}: {dict(c)}")
+        lay[role] = c.most_common(1)[0][0]
     lo, hi = min(globs), max(globs) + 8
     lo = (lo - 0x10000) & ~0xFFF
     hi = (hi + 0x10000 + 0xFFF) & ~0xFFF
@@ -636,10 +713,13 @@ def derive_manager_window(g: Game, anchor: int):
         fail(f"manager window {lo:#x}..{hi:#x} is not inside one data section")
     if hi - lo > 0x100000:
         fail(f"manager window too large ({hi - lo:#x})")
-    skipped = ", ".join(f"{t:#x} at {a:#x}" for a, t in dropped[:3])
-    note(f"manager globals: {len(globs)} distinct, {min(globs):#x}..{max(globs):#x}"
-         + (f"; dropped {len(dropped)} non-pointer candidate(s): {skipped}" if dropped else ""))
-    return lo, hi
+    note(f"manager globals: {len(globs)} distinct in the +{z:#x} bucket-walk group "
+         f"({sum(1 for x in sites if x[3] is None)} sites load none), "
+         f"{min(globs):#x}..{max(globs):#x}; others {counts[1:3]}")
+    note(f"manager layout: bucket count +{lay['div']:#x}  entry count +{lay['count']:#x}  "
+         f"bucket array +{lay['buckets']:#x}  entry-pointer array +{lay['entries']:#x}")
+    return lo, hi, lay
+
 
 
 # ----------------------------------------------------------------- ASI side
@@ -798,6 +878,47 @@ def apply_layout(asi, lay):
     note(f"diagnostic probe fin         rva {asi.rva(hits[0]):#x}: guards and reads re-emitted, shadow pair {shadow[0]:#x}/{shadow[1]:#x}")
 
 
+# The AX walk and slot patcher read the manager at five displacements. Each site
+# is (rva, byte offset of the disp8 inside the instruction, the instruction as
+# AX has it, the role). AX's `[mgr+8]` and `[mgr+0x6C]` are both the entry
+# count: 3732's manager has one field for it.
+MGR_AX = {"div": 0x68, "count": 0x6C, "buckets": 0x78, "entries": 0x58}
+MGR_SITES = (
+    (0x461B4, 2, "83 78 6c 00", "count"),         # walk: has entries?
+    (0x461BE, 2, "83 78 68 00", "div"),           # walk: bucket count nonzero?
+    (0x4620E, 3, "44 8b 40 68", "div"),           # walk: hash % bucket count
+    (0x46226, 3, "48 03 41 78", "buckets"),       # walk: bucket array
+    (0x46261, 2, "3b 51 08", "count"),            # walk: index < entry count
+    (0x4626E, 3, "48 8b 49 58", "entries"),       # walk: entry-pointer array
+    (0x0874C, 3, "4c 8b 50 58", "entries"),       # slot patcher: entry-pointer array
+    (0x08755, 3, "44 8b 48 08", "count"),         # slot patcher: entry count
+)
+# what the diagnostic dump reads: the AX values until apply_manager_offsets says otherwise
+MGR = {"count": 0x08, "entries": 0x58}
+
+
+def apply_manager_offsets(asi, lay):
+    """Point the eight manager reads at the layout the game uses, when it is not
+    the AX one. Every site is a disp8 and the new values are disp8 too, so only
+    that byte changes; length and branches are untouched."""
+    if lay is None:
+        note("manager offsets             no layout derived: AX offsets kept")
+        return
+    if lay["buckets"] == MGR_AX["buckets"]:
+        note("manager offsets             unchanged (AX layout)")
+        return
+    for rva, at, want, role in MGR_SITES:
+        asi.expect(rva, want)
+        v = lay[role]
+        if not 0 <= v < 0x80:
+            fail(f"manager offset {role} +{v:#x} does not fit a disp8")
+        asi.img[asi.off(rva) + at] = v
+    MGR.update(count=lay["count"], entries=lay["entries"])
+    note(f"manager offsets             div +{lay['div']:#x} count +{lay['count']:#x} "
+         f"buckets +{lay['buckets']:#x} entries +{lay['entries']:#x} "
+         f"(AX: +0x68/+0x6C|+8/+0x78/+0x58) at {len(MGR_SITES)} sites")
+
+
 def apply_entry_offsets(asi):
     """Move every read and write of the entry's capacity pair to its new home.
 
@@ -912,7 +1033,7 @@ def apply_priv_diag(asi, dump_mgr, walk_open=True):
     if slot_live:
         strings += [("slots", b"  [DBG] slot patcher -> %d")]
     if dump_mgr:
-        strings += [("cnt", b"  [DBG] mgr+08 count=%u  mgr+58 array=%016llX"),
+        strings += [("cnt", b"  [DBG] entry count=%u  entry array=%016llX"),
                     ("mgr", b"  [DBG] mgr+%02X = %016llX"),
                     ("ent", b"  [DBG] entry[%u] = %016llX"),
                     ("word", b"  [DBG]   entry[%u] +%02X = %016llX")]
@@ -1008,8 +1129,9 @@ def emit_dump(e, asi, fmt):
     """The --dump-mgr block: the manager's fields, then every entry it holds.
 
     Every read is behind `rdbl` (a VirtualQuery-backed readable-page test), the
-    entry count is read from `[mgr+8]` instead of assumed to be 24 (capped at
-    0x40), and an entry is dumped as sixteen qwords rather than fourteen --
+    entry count is read from the manager (MGR["count"], derived) instead of
+    assumed to be 24 (capped at 0x40), and an entry is dumped as thirty-two
+    qwords rather than fourteen --
     3732 may have changed the entry's size as 3460 changed its fields, and a
     count or size that is too small is exactly what hid the layout last time.
     All state lives in .psdata; the registers do not survive the calls."""
@@ -1025,11 +1147,11 @@ def emit_dump(e, asi, fmt):
     e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
     # count and array, so the log says what the walk would have been given
     e.rip("48 8B 05", PS_MGR)
-    e.h("8B 50 08")                                         # mov edx,[rax+8]
-    e.h("4C 8B 40 58")                                      # mov r8,[rax+0x58]
+    e.h("8B 50 %02X" % MGR["count"])                        # mov edx,[rax+count]
+    e.h("4C 8B 40 %02X" % MGR["entries"])                   # mov r8,[rax+entries]
     e.rip("48 8D 0D", fmt["cnt"]); e.rip("E8", LOGGER)
     e.rip("48 8B 05", PS_MGR)
-    e.h("8B 40 08")                                         # mov eax,[rax+8]
+    e.h("8B 40 %02X" % MGR["count"])                        # mov eax,[rax+count]
     e.h("83 F8 40"); e.j("0F 86", "capok")                  # cmp eax,0x40 ; jbe
     e.h("B8 40 00 00 00")
     e.label("capok")
@@ -1048,7 +1170,7 @@ def emit_dump(e, asi, fmt):
     e.h("83 F8 30"); e.j("0F 82", "l1")
     e.label("l1done")
     # the entry array [mgr+0x58]: P, then entry j at [P + j*8], then its words
-    e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 58")
+    e.rip("48 8B 05", PS_MGR); e.h("48 8B 48 %02X" % MGR["entries"])
     e.rip("48 89 0D", PS_P)
     e.rip("E8", asi.rdbl); e.h("84 C0"); e.j("0F 84", "dmpout")
     e.rip("C7 05", PS_J, tail=4); e.h("00 00 00 00")
@@ -1074,7 +1196,7 @@ def emit_dump(e, asi, fmt):
     e.rip("8B 15", PS_J)
     e.rip("48 8D 0D", fmt["word"]); e.rip("E8", LOGGER)
     e.rip("8B 05", PS_K); e.h("FF C0"); e.rip("89 05", PS_K)
-    e.h("83 F8 10"); e.j("0F 82", "l3")                     # sixteen qwords per entry
+    e.h("83 F8 20"); e.j("0F 82", "l3")                     # thirty-two qwords per entry
     e.label("next")
     e.rip("8B 05", PS_J); e.h("FF C0"); e.rip("89 05", PS_J)
     e.rip("3B 05", PS_N); e.j("0F 82", "l2")                # j < the manager's own count
@@ -1388,7 +1510,7 @@ def main():
     if housing:
         inv_vt = derive_inventory_vtable(g)
         note(f"InventoryInfoManager vtable game+{inv_vt:#x}")
-        win_lo, win_hi = derive_manager_window(g, mainchar)
+        win_lo, win_hi, mgr_layout = derive_manager_layout(g, mainchar)
         note(f"manager scan window game+{win_lo:#x}..{win_hi:#x} ({(win_hi - win_lo) // 8} qwords)")
 
     print("\npatching")
@@ -1500,6 +1622,7 @@ def main():
         # The entry's capacity pair moved on 3460; both the slot patcher and
         # the F4 walk read it, so this applies to every build that has either.
         apply_entry_offsets(asi)
+        apply_manager_offsets(asi, mgr_layout)
         if no_chests:
             # Keep the whole runtime machinery (manager lookup, worker, F4
             # path) but stop the 10 -> 1000 rewrite of the five Housing_*
